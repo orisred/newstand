@@ -12,7 +12,7 @@ Shopify's selling plan anchors only repeat on a weekday, a day of the month or a
 
 - Shopify app template (React Router), Polaris web components, App Bridge
 - Cloudflare Workers (via `@cloudflare/vite-plugin`), D1 database through Prisma's D1 adapter
-- Sessions in Cloudflare KV (`@shopify/shopify-app-session-storage-kv`)
+- Sessions in D1, refreshed on load (`app/session-storage.server.ts`)
 - Cron Triggers (hourly tick) and Cloudflare Queues for background work
 - Workers Paid plan ($5/month)
 - Theme app extension (plan picker) and customer account UI extension (portal)
@@ -37,6 +37,14 @@ To run the built Worker instead, use `npm run build`, `npm run db:migrate:local`
 ## Database changes
 
 Edit `prisma/schema.prisma`, then generate the next SQL file with `npx prisma migrate diff`, save it as `migrations/NNNN_name.sql`, and apply it with `wrangler d1 migrations apply`. `prisma migrate deploy` doesn't work on D1. Check the SQL before applying it: Prisma writes JSON defaults unquoted, which is invalid.
+
+## Background jobs
+
+Add a job type and, if the tick should find it, a finder in `app/jobs/registry.server.ts`. Merchant actions call `enqueueJobs` directly. Give each job a stable `id`: that's its idempotency key, so the same ID runs once however often it's enqueued or delivered.
+
+A job that keeps failing is retried with backoff for about half an hour, then goes to the dead-letter queue, which logs `job.dead` and keeps the message in `JobRun` with status `DEAD`. It never runs again by itself. To run it again, delete its row and send the stored `body` to the queue.
+
+Logs are JSON with `event`, `jobType`, `jobId` and `shop`. Find failures in the Workers logs by searching for `job.failed` or `job.dead`.
 
 Then follow `docs/BUILD_STEPS.md`, one agent thread per step.
 

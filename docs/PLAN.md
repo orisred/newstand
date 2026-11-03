@@ -36,7 +36,7 @@ Deferred: bundles, swaps, add-ons with a release, print-run caps, gated digital 
 ## Architecture
 
 - Shopify app template (React Router), Polaris web components, App Bridge, ported to Cloudflare Workers.
-- Data in D1 (SQLite) via Prisma's D1 adapter; sessions in KV.
+- Data in D1 (SQLite) via Prisma's D1 adapter, including sessions.
 - One Worker with three handlers: `fetch` (embedded app, webhooks, portal API), `scheduled` (hourly Cron Trigger finds due work), `queue` (Cloudflare Queues consumer does billing, order runs, emails).
 - Workers Paid plan: about $5 a month for Cake Zine and roughly $5 to $10 at 500 shops.
 - Jobs: pre-order announcement (switch new subscribers), order run at the shop's order timing step (create orders and charge per-release plans together), renewal billing, retries, reminder emails, member tag updates.
@@ -87,7 +87,7 @@ Prisma models are in `prisma/schema.prisma`.
 
 ## Build order
 
-1. Scaffold: Partner account, dev store, template ported to Workers (D1, KV, Queues, Cron).
+1. Scaffold: Partner account, dev store, template ported to Workers (D1, Queues, Cron).
 2. Releases and plans: admin screens, scopes requested, selling plan sync, theme extension plan picker.
 3. Subscriptions in: contract webhook creates a subscription with its first release.
 4. Release runs: announce and ready-to-ship actions (manual or scheduled); the run creates $0 orders, closes the release, CSV export.

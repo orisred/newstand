@@ -1,5 +1,4 @@
 // App models for Cloudflare D1 (SQLite) via @prisma/adapter-d1.
-// Sessions live in KV, so the template's Session model is not needed.
 // Migrations: prisma migrate diff -> migrations/NNNN_name.sql -> wrangler d1 migrations apply.
 // migrate diff writes JSON defaults unquoted, which is invalid SQL: quote them by hand.
 
@@ -224,4 +223,31 @@ model Event {
   createdAt       DateTime      @default(now())
 
   @@index([shopId, type, createdAt])
+}
+
+enum JobRunStatus {
+  CLAIMED // running, or failed and waiting for its retry; a lapsed lease can be claimed again
+  DONE
+  DEAD    // used up its retries and reached the dead-letter queue; never runs again by itself
+}
+
+// One row per job idempotency key: what makes a job run once when its message arrives twice.
+model JobRun {
+  key            String       @id // Job.id, such as subscriptionId:releaseId:attempt
+  type           String
+  shop           String?
+  status         JobRunStatus @default(CLAIMED)
+  owner          String?      // which run holds the lease
+  leaseExpiresAt DateTime?
+  runs           Int          @default(1)
+  lastError      String?      // error name only, never a message
+  body           String?      // the message, kept when it goes DEAD so it can be sent again
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+}
+
+// Shopify offline tokens. Read and written only by app/session-storage.server.ts. See DECISIONS.md.
+model OfflineSession {
+  id   String @id // offline_{shop}
+  data String // the session as JSON
 }
