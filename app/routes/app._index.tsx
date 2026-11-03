@@ -22,13 +22,16 @@ import {
 import {
   createRelease,
   listReleases,
+  listWaitingOrders,
   parseQuantity,
   parseTitle,
+  setReleaseProduct,
   transitionRelease,
   TITLE_MAX_LENGTH,
 } from "../releases.server";
 import { getOrCreateShop } from "../shop.server";
 import { authenticate } from "../shopify.server";
+import { MIXED_HANDLED_EVENT, MIXED_PLANS_EVENT } from "../subscriptions.server";
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -40,11 +43,29 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     shop.id,
     Number.isInteger(before) && before > 0 ? before : undefined,
   );
+  const [waiting, mixed] = await Promise.all([
+    listWaitingOrders(db, shop.orderTiming, releases),
+    db.event.findMany({
+      where: { shopId: shop.id, type: MIXED_PLANS_EVENT },
+      orderBy: { createdAt: "desc" },
+      take: 10,
+      select: { id: true, payload: true },
+    }),
+  ]);
   return {
     word: shop.releaseWordSingular,
     plural: shop.releaseWordPlural,
     releases,
     nextBefore,
+    waiting,
+    mixed: mixed.map(({ id, payload }) => {
+      const { orderGid, orderName } = payload as {
+        orderGid?: string;
+        orderName?: string;
+      };
+      const orderId = String(orderGid).split("/").pop();
+      return { id, orderId, orderName: orderName ?? `Order ${orderId}` };
+    }),
     // One-time token for the create form: a double submit carries the same one.
     createKey: crypto.randomUUID(),
   };
@@ -97,7 +118,38 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     } satisfies ActionData;
   }
 
+  if (intent === "mixedHandled") {
+    const { count } = await db.event.updateMany({
+      where: {
+        id: String(form.get("eventId")),
+        shopId: shop.id,
+        type: MIXED_PLANS_EVENT,
+      },
+      data: { type: MIXED_HANDLED_EVENT },
+    });
+    return {
+      ok: count === 1,
+      message: count === 1 ? "Marked as handled." : "That sign-up was already handled.",
+    } satisfies ActionData;
+  }
+
   const releaseId = form.get("releaseId");
+  if (intent === "setProduct" && typeof releaseId === "string") {
+    const saved = await setReleaseProduct(
+      db,
+      context.cloudflare.env,
+      { ...shop, shopDomain: session.shop },
+      releaseId,
+      String(form.get("productGid")),
+      String(form.get("productTitle")),
+    );
+    return {
+      ok: saved,
+      message: saved
+        ? `Product saved for this ${word}.`
+        : `Nothing changed: that isn't a product variant of this ${word}.`,
+    } satisfies ActionData;
+  }
   if (!isReleaseAction(intent) || typeof releaseId !== "string") {
     return { ok: false, message: "Unknown action." } satisfies ActionData;
   }
@@ -131,7 +183,7 @@ const day = (date: Date | null) =>
   date ? date.toISOString().slice(0, 10) : null;
 
 export default function Releases() {
-  const { word, plural, releases, nextBefore, createKey } =
+  const { word, plural, releases, nextBefore, createKey, waiting, mixed } =
     useLoaderData<typeof loader>();
   const fetcher = useFetcher<ActionData>();
   const shopify = useAppBridge();
@@ -153,8 +205,74 @@ export default function Releases() {
   const act = (intent: ReleaseAction, releaseId: string) =>
     fetcher.submit({ intent, releaseId }, { method: "POST" });
 
+  const pickProduct = async (releaseId: string) => {
+    // The product picker, because the variant picker shows a one-variant product with no name.
+    const selected = await shopify.resourcePicker({
+      type: "product",
+      multiple: false,
+      action: "select",
+    });
+    const product = selected?.[0] as
+      | { title: string; variants: { id?: string; title?: string }[] }
+      | undefined;
+    if (!product) return;
+    if (product.variants.length !== 1 || !product.variants[0].id) {
+      shopify.toast.show(
+        `Choose one variant to ship with this ${word}, not the whole product.`,
+        { isError: true },
+      );
+      return;
+    }
+    const [variant] = product.variants;
+    fetcher.submit(
+      {
+        intent: "setProduct",
+        releaseId,
+        productGid: variant.id!,
+        productTitle:
+          variant.title && variant.title !== "Default Title"
+            ? `${product.title} - ${variant.title}`
+            : product.title,
+      },
+      { method: "POST" },
+    );
+  };
+
   return (
     <s-page heading={heading}>
+      {mixed.length > 0 && (
+        <s-banner
+          tone="critical"
+          heading="A sign-up needs you: one contract holds more than one plan"
+        >
+          <s-stack gap="base">
+            <s-paragraph>
+              Shopify put two plans on one subscription contract, and a contract
+              is charged as a whole, so the app can&apos;t charge them separately.
+              No subscription was created and the order stays unfulfilled. Refund
+              it and ask the customer to buy each plan separately.
+            </s-paragraph>
+            {mixed.map(({ id, orderId, orderName }) => (
+              <s-stack key={id} direction="inline" gap="base" alignItems="center">
+                <s-link href={`shopify://admin/orders/${orderId}`}>
+                  {orderName}
+                </s-link>
+                <s-button
+                  {...(busy ? { disabled: true } : {})}
+                  onClick={() =>
+                    fetcher.submit(
+                      { intent: "mixedHandled", eventId: id },
+                      { method: "POST" },
+                    )
+                  }
+                >
+                  Mark as handled
+                </s-button>
+              </s-stack>
+            ))}
+          </s-stack>
+        </s-banner>
+      )}
       <s-section heading={`New ${word}`}>
         {/* Keyed on the token, so the form clears when a new one arrives. */}
         <fetcher.Form method="post" key={createKey}>
@@ -197,6 +315,7 @@ export default function Releases() {
               <s-table-header>Title</s-table-header>
               <s-table-header>Status</s-table-header>
               <s-table-header>Quantity</s-table-header>
+              <s-table-header>Ships as</s-table-header>
               <s-table-header>Actions</s-table-header>
             </s-table-header-row>
             <s-table-body>
@@ -222,6 +341,33 @@ export default function Releases() {
                     </s-stack>
                   </s-table-cell>
                   <s-table-cell>{release.quantity ?? "No cap"}</s-table-cell>
+                  <s-table-cell>
+                    <s-stack gap="small-300">
+                      {release.productTitle ? (
+                        <s-text>{release.productTitle}</s-text>
+                      ) : (
+                        <s-badge tone="warning">No product chosen</s-badge>
+                      )}
+                      {waiting[release.id] && (
+                        <s-text tone="critical">
+                          {waiting[release.id].count} waiting for an order.{" "}
+                          {waiting[release.id].error ??
+                            (release.productGid
+                              ? "Being created."
+                              : `Choose a product to ship this ${word}.`)}
+                        </s-text>
+                      )}
+                      <s-stack direction="inline">
+                        <s-button
+                          variant="tertiary"
+                          {...(busy ? { disabled: true } : {})}
+                          onClick={() => pickProduct(release.id)}
+                        >
+                          {release.productGid ? "Change" : "Choose product"}
+                        </s-button>
+                      </s-stack>
+                    </s-stack>
+                  </s-table-cell>
                   <s-table-cell>
                     <s-stack direction="inline" gap="small">
                       {actionsFor(release.status).map((name) =>

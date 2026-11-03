@@ -15,7 +15,7 @@ Shopify's selling plan anchors only repeat on a weekday, a day of the month or a
 - Sessions in D1, refreshed on load (`app/session-storage.server.ts`)
 - Cron Triggers (hourly tick) and Cloudflare Queues for background work
 - Workers Paid plan ($5/month)
-- Theme app extension (plan picker) and customer account UI extension (portal)
+- Theme app extension (plan picker), customer account UI extension (portal) and a cart validation Function (one plan per checkout)
 - Built-in emails, each switchable off in favor of Shopify Flow or Klaviyo
 
 ## Getting started
@@ -38,6 +38,10 @@ To run the built Worker instead, use `npm run build`, `npm run db:migrate:local`
 
 The theme app extension in `extensions/plan-picker` adds a **Plan picker** app block to the product page. Release it with `npm run deploy`. A merchant adds it in the theme editor: Customize the theme, open a product template, **Add block** on the product information section, choose **Plan picker** under Apps, move it above the buy buttons and save. It shows only this app's plans (`app_id`), with the first chosen, and joins the theme's product form through the `form` attribute, so it needs no JavaScript. The form is assumed to be `product-form-<section id>` (Dawn and its descendants); another theme sets **Product form ID** in the block. Its heading and subscription terms are block settings; empty terms show nothing. A theme that adds its own `selling_plan` to the cart request, or lists selling plans itself, will clash with it (the dev store's theme did, and was patched).
 
+## One plan per checkout
+
+The Function in `extensions/one-plan-per-cart` stops a cart holding two different selling plans, because Shopify can merge them onto one contract, which can't be charged separately. `npm run deploy` builds and releases it, and the first plan sync after that turns it on. A merchant can turn it off under Settings > Checkout > Checkout rules. See "Subscriptions in" in `docs/DECISIONS.md`.
+
 ## Database changes
 
 Edit `prisma/schema.prisma`, then generate the next SQL file with `npx prisma migrate diff`, save it as `migrations/NNNN_name.sql`, and apply it with `wrangler d1 migrations apply`. `prisma migrate deploy` doesn't work on D1. Check the SQL before applying it: Prisma writes JSON defaults unquoted, which is invalid, and it rebuilds a table (drop and copy) for changes that need only `ALTER TABLE ... ADD COLUMN`, so write those by hand (see `migrations/0003_plan_sync.sql`).
@@ -48,7 +52,7 @@ Add a job type and, if the tick should find it, a finder in `app/jobs/registry.s
 
 A job that keeps failing is retried with backoff for about half an hour, then goes to the dead-letter queue, which logs `job.dead` and keeps the message in `JobRun` with status `DEAD`. It never runs again by itself. To run it again, delete its row and send the stored `body` to the queue.
 
-Logs are JSON with `event`, `jobType`, `jobId` and `shop`. Find failures in the Workers logs by searching for `job.failed` or `job.dead`.
+Logs are JSON with `event`, `jobType`, `jobId` and `shop`. Find failures in the Workers logs by searching for `job.failed` or `job.dead`. Search `payment_order.not_visible` for payment orders the app couldn't mark, and `delivery.duplicate_orders` for a repeated $0 order.
 
 Then follow `docs/BUILD_STEPS.md`, one agent thread per step.
 

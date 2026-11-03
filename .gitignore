@@ -16,6 +16,7 @@ build/
 /prisma/dev.sqlite-journal
 database.sqlite
 /extensions/*/dist
+/extensions/*/generated
 .shopify/*
 .shopify.lock
 .react-router/

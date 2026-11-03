@@ -1,10 +1,13 @@
 import type { createDb } from "./db.server";
+import type { OrderTiming } from "./generated/prisma/enums";
+import { enqueueJobs } from "./jobs/runner.server";
 import {
   capitalize,
   RELEASE_ACTIONS,
   type ReleaseAction,
   type ReleaseStatus,
 } from "./release-actions";
+import { deliveryOrderJob, orderStepReached } from "./subscriptions.server";
 
 type Db = ReturnType<typeof createDb>;
 
@@ -45,6 +48,8 @@ export async function listReleases(db: Db, shopId: string, before?: number) {
       quantity: true,
       preorderOpensAt: true,
       cutoffAt: true,
+      productGid: true,
+      productTitle: true,
     },
   });
   const releases = rows.slice(0, PAGE_SIZE);
@@ -95,6 +100,74 @@ export async function createRelease(
     }
   }
   throw new Error("unreachable");
+}
+
+/**
+ * Orders waiting on the merchant, for one page of releases. An order is only waiting once its
+ * step has been reached; before that a subscriber is simply assigned.
+ */
+export async function listWaitingOrders(
+  db: Db,
+  orderTiming: OrderTiming,
+  releases: { id: string; status: ReleaseStatus }[],
+) {
+  const due = releases.filter(({ status }) =>
+    orderStepReached(status, orderTiming),
+  );
+  if (due.length === 0) return {};
+  const rows = await db.delivery.groupBy({
+    by: ["releaseId", "orderError"],
+    where: { status: "PENDING", releaseId: { in: due.map(({ id }) => id) } },
+    _count: true,
+  });
+  const waiting: Record<string, { count: number; error: string | null }> = {};
+  for (const row of rows) {
+    const entry = (waiting[row.releaseId] ??= { count: 0, error: null });
+    entry.count += row._count;
+    entry.error ??= row.orderError;
+  }
+  return waiting;
+}
+
+const VARIANT_GID = /^gid:\/\/shopify\/ProductVariant\/\d+$/;
+
+/**
+ * Sets the variant a release ships as, then queues the orders that were waiting for it or that
+ * Shopify refused. Picking the same variant again is how a merchant retries those. Each job
+ * is safe to repeat, because `createDeliveryOrder` never creates a second order.
+ */
+export async function setReleaseProduct(
+  db: Db,
+  env: Pick<Env, "JOBS">,
+  shop: { id: string; shopDomain: string; orderTiming: OrderTiming },
+  releaseId: string,
+  productGid: string,
+  productTitle: string,
+) {
+  if (!VARIANT_GID.test(productGid)) return false;
+  const { count } = await db.release.updateMany({
+    where: { id: releaseId, shopId: shop.id },
+    data: { productGid, productTitle: productTitle.slice(0, 255) },
+  });
+  if (count === 0) return false;
+  const release = await db.release.findFirstOrThrow({
+    where: { id: releaseId },
+    select: { status: true },
+  });
+  if (!orderStepReached(release.status, shop.orderTiming)) return true;
+  const waiting = await db.delivery.findMany({
+    where: { releaseId, status: "PENDING" },
+    select: { id: true },
+  });
+  // A new try each time, or a repeat of a job that's already done would be skipped.
+  const attempt = crypto.randomUUID();
+  await enqueueJobs(
+    env as Env,
+    waiting.map(({ id }) =>
+      deliveryOrderJob(shop.shopDomain, id, attempt),
+    ),
+  );
+  return true;
 }
 
 export type TransitionResult =
