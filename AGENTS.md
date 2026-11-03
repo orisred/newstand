@@ -8,8 +8,9 @@ Read `docs/PLAN.md` and `docs/DECISIONS.md` before changing behavior. Decisions 
 - A **Plan** sells a number of releases and is synced to a Shopify selling plan.
 - A **Subscription** links one Shopify subscription contract to a plan and counts `releasesRemaining`.
 - A **Delivery** is one subscription receiving one release, backed by one Shopify order.
-- A Plan is `PER_RELEASE` (charged at the plan's `perReleaseChargeAt` step, default when the pre-order opens) or `PREPAID_BUNDLE` (a number of releases paid upfront, shown under a merchant-chosen `displayName`).
-- Bundle renewal follows the plan's `renewalRule`. The default `TERM_DATE_HOLD_IF_LATE` renews at `termEndsAt`, but if the last paid release's order hasn't been created yet, it waits until that order exists.
+- A Plan is `PER_RELEASE` or `PREPAID_BUNDLE` (a number of releases paid upfront, shown under a merchant-chosen `displayName`). The initial charge on either happens at sign-up.
+- A `PER_RELEASE` charge is tied to an order and they happen together. The first release's order is the one generated at checkout, with the sign-up charge. Each later release is charged at the same moment its order is created, so the charge follows the shop's `orderTiming` step (default ready to ship, when it starts shipping).
+- Bundle renewal follows the plan's `renewalRule`. The default `TERM_DATE_HOLD_IF_LATE` renews at `termEndsAt`, but if the last paid release's order hasn't been created yet, it waits and charges when that order is created.
 
 ## Rules
 

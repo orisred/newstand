@@ -5,7 +5,7 @@ This file is the build-facing summary. Settled product decisions live in `DECISI
 
 ## What we are building
 
-A Shopify app for subscriptions sold as releases. A release moves from unannounced to pre-order to ready to ship, either when the merchant presses a button (default) or on scheduled dates; it can also have a quantity. A plan is either pay-per-release (charged when each pre-order opens, by default) or a prepaid bundle of releases with its own display name ("Yearly subscription", "2 issues paid upfront"). A bundle renews on its term date, for example 1 year after sign-up, but if its last paid release is late, renewal waits until that release's order is created. The renewal rule is a per-plan setting.
+A Shopify app for subscriptions sold as releases. A release moves from unannounced to pre-order to ready to ship, either when the merchant presses a button (default) or on scheduled dates; it can also have a quantity. Every plan takes its initial charge at sign-up. After that, a plan is either pay-per-release (the first release's order is generated at checkout with the sign-up charge; each later release is charged at the same moment its order is created, by default when it starts shipping) or a prepaid bundle of releases with its own display name ("Yearly subscription", "2 issues paid upfront"). A bundle renews on its term date, for example 1 year after sign-up, but if its last paid release is late, the renewal is charged when that release's order is created. The renewal rule is a per-plan setting.
 
 Shopify holds the checkout, the saved card, the subscription contract and the orders. The app owns the release calendar, when each subscriber is charged, who receives each release, the customer portal and the merchant admin.
 
@@ -22,7 +22,7 @@ Shopify holds the checkout, the saved card, the subscription contract and the or
 2. Releases without fixed dates: each release stays unannounced until the merchant announces its pre-order, then is marked ready to ship. Merchants who prefer dates can schedule both steps instead.
 3. Start rule: the switchover is when the next release's pre-order opens. Before that, a new subscriber gets the latest released issue, shipped right away; after it, they get the pre-order issue.
 4. Release runs: when a release is marked ready to ship (or when its pre-order opens, per shop setting), create one $0 Shopify order per subscriber and export the run as CSV.
-5. Renewal engine: bundles renew on their term date, held until the last paid release's order exists if it is late; per-release plans charge at each pre-order (configurable); retry failures, then pause.
+5. Renewal engine: bundles renew on their term date, or when the last paid release's order is created if it is late; per-release plans charge when each release's order is created, following the shop's order timing; retry failures, then pause.
 6. Customer portal (customer account UI extension): address, card, cancel, upcoming releases.
 7. Built-in emails: welcome, **pre-order announced**, upcoming charge, failed payment, last paid release shipping. Each can be switched off.
     - **Pre-order announced** goes to every subscriber who will receive the new release (gift recipients, not buyers). It says they'll get the new issue as soon as it starts shipping, and that their order is created when shipping starts. The main call to action is "Confirm or update your delivery address", linking to the address page in the portal. Confirmations are recorded per delivery so the admin can see who hasn't confirmed. Paused subscribers get "update your card" as the main call to action instead.
@@ -39,7 +39,7 @@ Deferred: bundles, swaps, add-ons with a release, print-run caps, gated digital 
 - Data in D1 (SQLite) via Prisma's D1 adapter; sessions in KV.
 - One Worker with three handlers: `fetch` (embedded app, webhooks, portal API), `scheduled` (hourly Cron Trigger finds due work), `queue` (Cloudflare Queues consumer does billing, order runs, emails).
 - Workers Paid plan: about $5 a month for Cake Zine and roughly $5 to $10 at 500 shops.
-- Jobs: pre-order announcement (switch new subscribers, per-release charges), ready-to-ship run (create orders), renewal billing, retries, reminder emails, member tag updates.
+- Jobs: pre-order announcement (switch new subscribers), order run at the shop's order timing step (create orders and charge per-release plans together), renewal billing, retries, reminder emails, member tag updates.
 - Webhooks: subscription contract create/update, billing attempt success/failure, customer and shop GDPR, app uninstalled.
 - Extensions: theme app extension (plan picker), customer account UI extension (portal).
 
@@ -63,7 +63,7 @@ Draft Prisma models are in `prisma/schema.draft.prisma`.
 | Situation | What the app does |
 | --- | --- |
 | Sign-up between issues | Before the next pre-order opens: latest released issue, shipped now. After: the pre-order issue |
-| Last paid release is late past the renewal date | Renewal is held until that release's order is created; subscriber gets a notice |
+| Last paid release is late past the renewal date | Renewal is held and charged when that release's order is created; subscriber gets a notice |
 | Release cancelled | Doesn't count against paid releases |
 | Extra release before a bundle's renewal date | Not included; renewal stays on the term date and the new term starts with the next release. A bundle buys N releases, not every release in 12 months |
 | Renewal card still failing when orders are created | Subscription pauses; that release ships late once paid |
@@ -87,8 +87,8 @@ Draft Prisma models are in `prisma/schema.draft.prisma`.
 
 ## Build order
 
-1. Scaffold: Partner account, dev store, template ported to Workers (D1, KV, Queues, Cron), scopes requested.
-2. Releases and plans: admin screens, selling plan sync, theme extension plan picker.
+1. Scaffold: Partner account, dev store, template ported to Workers (D1, KV, Queues, Cron).
+2. Releases and plans: admin screens, scopes requested, selling plan sync, theme extension plan picker.
 3. Subscriptions in: contract webhook creates a subscription with its first release.
 4. Release runs: announce and ready-to-ship actions (manual or scheduled); the run creates $0 orders, closes the release, CSV export.
 5. Renewals: term-date renewals with late-release hold, per-release charges, retries, pause, price-change policy, emails.

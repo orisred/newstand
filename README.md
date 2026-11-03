@@ -1,6 +1,6 @@
 # Release Subscriptions
 
-A Shopify app for subscriptions sold as **releases**: magazine and zine issues, record pressings, club drops, seasonal boxes. Each release has its own date and order cutoff. A plan sells a number of releases, and renewal charges when the paid releases run out.
+A Shopify app for subscriptions sold as **releases**: magazine and zine issues, record pressings, club drops, seasonal boxes. Dates are optional: by default the merchant moves each release from unannounced to pre-order to ready to ship by hand. A plan sells a number of releases, either paid per release or as a prepaid bundle. A bundle renews on its term date by default, waiting if its last paid release's order hasn't been created yet.
 
 The first merchant is Cake Zine, moving off Conjured Memberships. A public App Store listing comes later.
 
