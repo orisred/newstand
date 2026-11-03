@@ -26,10 +26,11 @@ Shopify's selling plan anchors only repeat on a weekday, a day of the month or a
 4. Replace the template's Prisma schema with `prisma/schema.draft.prisma`. Generate SQL with `prisma migrate diff` and apply it with `wrangler d1 migrations apply`.
 5. Create a development store and run `shopify app dev`.
 
-Then follow the build order in `docs/PLAN.md`.
+Then follow `docs/BUILD_STEPS.md`, one agent thread per step.
 
 ## Docs
 
 - `docs/PLAN.md`: scope, MVP, architecture, data model, edge cases, build order
 - `docs/DECISIONS.md`: every product decision and the public-app setting it implies
+- `docs/BUILD_STEPS.md`: the build split into steps, each assigned an agent model and effort
 - `AGENTS.md`: instructions for coding agents working in this repo
