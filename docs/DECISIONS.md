@@ -9,7 +9,8 @@ All decided by N on 2026-11-01. "Cake Zine" is the first merchant's behavior; "P
 | Initial charge | At sign-up, on every plan (N, 2026-11-03) | Same |
 | Renewal timing (bundles) | Term date (1 year after sign-up, assuming 2 issues a year). If the last paid issue hasn't shipped by then, the renewal is charged when that issue's order is created | Renewal rule per plan: term date with late hold (default), term date only, or when paid releases run out |
 | Extra issue before renewal | Not included; wait for normal renewal (bundle = N issues, not all issues in 12 months) | Same |
-| First order for a new subscriber | Issue already released: order generated at checkout, ships right away. Sign-up during a pre-order: charged at sign-up, order created when shipping starts, same as existing subscribers (N, 2026-11-03) | Same |
+| Subscription and issue orders | The subscription is its own item: checkout and billing orders record payment and never ship an issue. Each issue ships on a separate generated $0 order (N, 2026-11-03) | Same |
+| First order for a new subscriber | Issue already released: issue order generated right after checkout, ships right away. Sign-up during a pre-order: charged at sign-up, issue order created when shipping starts, same as existing subscribers (N, 2026-11-03) | Same |
 | Renewal timing (per issue) | After the first issue, charge and order happen at the same time, when the issue starts shipping (changed by N on 2026-11-03; was before each issue's cutoff) | Same: the charge follows the shop's order timing setting, with no separate charge setting |
 | Auto-renew | On, with a reminder; opt out anytime | Auto, manual, or subscriber's choice |
 | Orders | One Shopify order per issue, created when the issue is ready to ship | Shop setting: create orders when ready to ship (default) or when the pre-order opens |

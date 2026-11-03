@@ -62,7 +62,7 @@ Draft Prisma models are in `prisma/schema.draft.prisma`.
 
 | Situation | What the app does |
 | --- | --- |
-| Sign-up between issues | Before the next pre-order opens: latest released issue, order generated at checkout and shipped now. After: the pre-order issue, charged at sign-up, order created when shipping starts along with existing subscribers' orders |
+| Sign-up between issues | Before the next pre-order opens: latest released issue, $0 order generated right after checkout and shipped now. After: the pre-order issue, charged at sign-up, $0 order created when shipping starts along with existing subscribers' orders |
 | Last paid release is late past the renewal date | Renewal is held and charged when that release's order is created; subscriber gets a notice |
 | Release cancelled | Doesn't count against paid releases |
 | Extra release before a bundle's renewal date | Not included; renewal stays on the term date and the new term starts with the next release. A bundle buys N releases, not every release in 12 months |
