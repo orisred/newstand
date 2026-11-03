@@ -3,6 +3,7 @@ import { applyD1Migrations, env } from "cloudflare:test";
 import { Session } from "@shopify/shopify-api";
 import type { ActionFunctionArgs } from "react-router";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { action as scopesUpdate } from "../app/routes/webhooks.app.scopes_update";
 import { action as uninstalled } from "../app/routes/webhooks.app.uninstalled";
 import { D1SessionStorage } from "../app/session-storage.server";
 import { unauthenticated } from "../app/shopify.server";
@@ -162,7 +163,9 @@ describe("refreshing on load", () => {
     await storage().storeSession(offlineSession(shop, -HOUR));
     stubFetch(() => new Response(null, { status: 503 }));
 
-    await expect(storage().loadSession(`offline_${shop}`)).rejects.toThrow("503");
+    await expect(storage().loadSession(`offline_${shop}`)).rejects.toThrow(
+      "503",
+    );
 
     const [kept] = await storage().findSessionsByShop(shop);
     expect(kept.refreshToken).toBe("old-refresh");
@@ -175,7 +178,9 @@ describe("refreshing on load", () => {
   it("returns nothing but keeps the session when Shopify rejects the refresh token", async () => {
     const shop = newShop();
     await storage().storeSession(offlineSession(shop, -HOUR));
-    stubFetch(() => Response.json({ error: "invalid_request" }, { status: 401 }));
+    stubFetch(() =>
+      Response.json({ error: "invalid_request" }, { status: 401 }),
+    );
 
     // Undefined makes an admin request run a token exchange, which replaces the session.
     expect(await storage().loadSession(`offline_${shop}`)).toBeUndefined();
@@ -205,42 +210,138 @@ describe("a background job through the Shopify library", () => {
   });
 });
 
+async function callWebhook(
+  handler: (args: ActionFunctionArgs) => Promise<Response>,
+  topic: string,
+  shop: string,
+  payload: object,
+) {
+  const body = JSON.stringify(payload);
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(env.SHOPIFY_API_SECRET),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(body),
+  );
+  return handler({
+    request: new Request(`https://app.example.com/webhooks/${topic}`, {
+      method: "POST",
+      body,
+      headers: {
+        "X-Shopify-Hmac-Sha256": btoa(
+          String.fromCharCode(...new Uint8Array(signature)),
+        ),
+        "X-Shopify-Topic": topic,
+        "X-Shopify-Shop-Domain": shop,
+        "X-Shopify-API-Version": "2026-10",
+        "X-Shopify-Webhook-Id": `webhook-${++nextShop}`,
+      },
+    }),
+  } as ActionFunctionArgs);
+}
+
 describe("the app/uninstalled webhook", () => {
   it("deletes the session even when its refresh token no longer works", async () => {
     const shop = newShop();
     await storage().storeSession(offlineSession(shop, -HOUR));
-    stubFetch(() => Response.json({ error: "invalid_request" }, { status: 401 }));
-    const body = JSON.stringify({ id: 1 });
-    const key = await crypto.subtle.importKey(
-      "raw",
-      new TextEncoder().encode(env.SHOPIFY_API_SECRET),
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["sign"],
-    );
-    const signature = await crypto.subtle.sign(
-      "HMAC",
-      key,
-      new TextEncoder().encode(body),
+    stubFetch(() =>
+      Response.json({ error: "invalid_request" }, { status: 401 }),
     );
 
-    const response = await uninstalled({
-      request: new Request("https://app.example.com/webhooks/app/uninstalled", {
-        method: "POST",
-        body,
-        headers: {
-          "X-Shopify-Hmac-Sha256": btoa(
-            String.fromCharCode(...new Uint8Array(signature)),
-          ),
-          "X-Shopify-Topic": "app/uninstalled",
-          "X-Shopify-Shop-Domain": shop,
-          "X-Shopify-API-Version": "2026-10",
-          "X-Shopify-Webhook-Id": "webhook-1",
-        },
-      }),
-    } as ActionFunctionArgs);
+    const response = await callWebhook(uninstalled, "app/uninstalled", shop, {
+      id: 1,
+    });
 
     expect(response.status).toBe(200);
     expect(await storage().findSessionsByShop(shop)).toEqual([]);
+  });
+});
+
+describe("the app/scopes_update webhook", () => {
+  it("changes the scope and nothing else", async () => {
+    const shop = newShop();
+    const before = offlineSession(shop);
+    await storage().storeSession(before);
+
+    const response = await callWebhook(
+      scopesUpdate,
+      "app/scopes_update",
+      shop,
+      {
+        current: ["write_products", "write_orders"],
+      },
+    );
+
+    expect(response.status).toBe(200);
+    const [after] = await storage().findSessionsByShop(shop);
+    expect(after.scope).toBe("write_products,write_orders");
+    expect(after.accessToken).toBe(before.accessToken);
+    expect(after.refreshToken).toBe(before.refreshToken);
+    expect(after.expires).toEqual(before.expires);
+  });
+
+  it("doesn't write back a stale token when a refresh lands during the update", async () => {
+    const shop = newShop();
+    await storage().storeSession(offlineSession(shop));
+    const store = storage();
+    const internals = store as unknown as {
+      readData(id: string): Promise<string | null>;
+    };
+    const original = internals.readData.bind(store);
+    let raced = false;
+    vi.spyOn(internals, "readData").mockImplementation(async (id: string) => {
+      const data = await original(id);
+      if (!raced) {
+        raced = true;
+        // A job refreshes between the webhook's read and its write.
+        await store.storeSession(offlineSession(shop, HOUR, "fresh"));
+      }
+      return data;
+    });
+
+    expect(await store.updateScope(shop, "write_products,write_orders")).toBe(
+      true,
+    );
+
+    const [after] = await storage().findSessionsByShop(shop);
+    expect(after.refreshToken).toBe("fresh-refresh");
+    expect(after.accessToken).toBe("fresh-access");
+    expect(after.scope).toBe("write_products,write_orders");
+  });
+
+  it("does nothing for a shop without a session", async () => {
+    expect(await storage().updateScope(newShop(), "write_products")).toBe(
+      false,
+    );
+  });
+});
+
+describe("a refreshed token and newly granted scopes", () => {
+  it("takes the scope Shopify returns on refresh, for admin requests and jobs alike", async () => {
+    const shop = newShop();
+    await storage().storeSession(offlineSession(shop, -HOUR));
+    stubFetch(() =>
+      Response.json({
+        access_token: "new-access",
+        refresh_token: "new-refresh",
+        scope: "write_products,write_own_subscription_contracts",
+        expires_in: 3600,
+        refresh_token_expires_in: 7776000,
+      }),
+    );
+
+    const { session } = await unauthenticated.admin(shop);
+
+    expect(session.scope).toBe(
+      "write_products,write_own_subscription_contracts",
+    );
+    const [stored] = await storage().findSessionsByShop(shop);
+    expect(stored.scope).toBe(session.scope);
   });
 });

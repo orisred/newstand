@@ -2,13 +2,13 @@ import type { ActionFunctionArgs } from "react-router";
 import { authenticate, sessionStorage } from "../shopify.server";
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { payload, session, topic, shop } = await authenticate.webhook(request);
+  const { payload, topic, shop } = await authenticate.webhook(request);
   console.log(`Received ${topic} webhook for ${shop}`);
 
-  const current = payload.current as string[];
-  if (session) {
-    session.scope = current.toString();
-    await sessionStorage.storeSession(session);
-  }
+  // Only the scope is written, never the session the webhook loaded: see updateScope.
+  await sessionStorage.updateScope(
+    shop,
+    (payload.current as string[]).toString(),
+  );
   return new Response();
 };

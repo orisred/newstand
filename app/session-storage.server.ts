@@ -50,6 +50,32 @@ export class D1SessionStorage {
     return refreshed ?? undefined;
   }
 
+  /**
+   * Changes only the scope of a shop's stored session. A webhook must not write back a whole
+   * session it read earlier: a refresh may have stored a newer token since, and the old
+   * refresh token might not survive that. So the write only lands on the row as it was read
+   * (compare and set), and otherwise reads again.
+   */
+  async updateScope(shop: string, scope: string) {
+    const id = `offline_${shop}`;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const data = await this.readData(id);
+      if (!data) return false;
+      const properties = JSON.parse(data) as [string, unknown][];
+      const next = properties.map(([key, value]) =>
+        key === "scope" ? [key, scope] : [key, value],
+      );
+      const { meta } = await this.db
+        .prepare(
+          `UPDATE "OfflineSession" SET "data" = ?1 WHERE "id" = ?2 AND "data" = ?3`,
+        )
+        .bind(JSON.stringify(next), id, data)
+        .run();
+      if (meta.changes === 1) return true;
+    }
+    throw new Error("Session kept changing while its scope was updated");
+  }
+
   async deleteSession(id: string) {
     await this.db
       .prepare(`DELETE FROM "OfflineSession" WHERE "id" = ?1`)
@@ -75,12 +101,14 @@ export class D1SessionStorage {
       .first<string>("data");
   }
 
-  /** Fails if the row changed since `data` was read: a token may have just arrived. */
   /** Returns null when Shopify rejects the token, and throws if it may work later. */
   private async refresh({ id, shop, refreshToken }: Session) {
     const response = await fetch(`https://${shop}/admin/oauth/access_token`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
       body: JSON.stringify({
         client_id: this.credentials.apiKey,
         client_secret: this.credentials.apiSecretKey,

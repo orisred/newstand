@@ -31,12 +31,12 @@ To run the built Worker instead, use `npm run build`, `npm run db:migrate:local`
 
 - Worker: `npm run db:migrate:remote`, then `npm run deploy:worker`. The client secret is stored with `wrangler secret put SHOPIFY_API_SECRET`.
 - App configuration (URLs, webhooks, scopes): `npm run deploy` (`shopify app deploy`).
-- `SHOPIFY_APP_URL` and `SCOPES` in `wrangler.jsonc` must match `application_url` and `access_scopes.scopes` in `shopify.app.toml`.
+- A scope change needs both: `npm run deploy` releases it and merchants are asked to approve it in the admin (the `app/scopes_update` webhook then updates the stored session, and a token refresh returns the new scope too). `SHOPIFY_APP_URL` and `SCOPES` in `wrangler.jsonc` must match `application_url` and `access_scopes.scopes` in `shopify.app.toml`.
 - `shopify app dev` leaves a dev preview on the store that overrides `application_url`. Run `shopify app dev clean` when you finish, or the store keeps using the dead tunnel.
 
 ## Database changes
 
-Edit `prisma/schema.prisma`, then generate the next SQL file with `npx prisma migrate diff`, save it as `migrations/NNNN_name.sql`, and apply it with `wrangler d1 migrations apply`. `prisma migrate deploy` doesn't work on D1. Check the SQL before applying it: Prisma writes JSON defaults unquoted, which is invalid.
+Edit `prisma/schema.prisma`, then generate the next SQL file with `npx prisma migrate diff`, save it as `migrations/NNNN_name.sql`, and apply it with `wrangler d1 migrations apply`. `prisma migrate deploy` doesn't work on D1. Check the SQL before applying it: Prisma writes JSON defaults unquoted, which is invalid, and it rebuilds a table (drop and copy) for changes that need only `ALTER TABLE ... ADD COLUMN`, so write those by hand (see `migrations/0003_plan_sync.sql`).
 
 ## Background jobs
 

@@ -1,5 +1,6 @@
 import { applyD1Migrations, env } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
+import { COUNTRY_CODES } from "../app/countries";
 import { createDb } from "../app/db.server";
 import {
   EMAIL_KEYS,
@@ -97,6 +98,9 @@ describe("parseSettings", () => {
       [{ ...valid, allowedCountries: "" }, "allowedCountries"],
       [{ ...valid, allowedCountries: "US, USA" }, "allowedCountries"],
       [{ ...valid, allowedCountries: "U1" }, "allowedCountries"],
+      [{ ...valid, allowedCountries: "US, ZZ" }, "allowedCountries"],
+      [{ ...valid, allowedCountries: "AN" }, "allowedCountries"],
+      [{ ...valid, allowedCountries: "XX" }, "allowedCountries"],
       [{ ...valid, orderTiming: "NEVER" }, "orderTiming"],
     ];
     for (const [fields, field] of cases) {
@@ -104,6 +108,26 @@ describe("parseSettings", () => {
       expect(result.ok).toBe(false);
       expect(Object.keys(result.ok ? {} : result.errors)).toContain(field);
     }
+  });
+});
+
+describe("country codes", () => {
+  it("accepts real ones, lower case, and Shopify's own XK", () => {
+    const result = parseSettings(
+      form({ ...valid, allowedCountries: "us gb, XK de" }),
+    );
+    expect(result.ok && result.values.allowedCountries).toEqual([
+      "US",
+      "GB",
+      "XK",
+      "DE",
+    ]);
+  });
+
+  it("holds each code once, with no placeholder codes", () => {
+    expect(COUNTRY_CODES.size).toBe(243);
+    expect(COUNTRY_CODES.has("ZZ")).toBe(false);
+    expect(COUNTRY_CODES.has("AN")).toBe(false);
   });
 });
 
