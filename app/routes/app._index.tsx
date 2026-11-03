@@ -1,250 +1,287 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import type {
   ActionFunctionArgs,
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
-import { useFetcher } from "react-router";
+import {
+  useFetcher,
+  useLoaderData,
+  useNavigate,
+  useSearchParams,
+} from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
-import { authenticate } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
+import { createDb } from "../db.server";
+import {
+  actionsFor,
+  capitalize,
+  isReleaseAction,
+  type ReleaseAction,
+} from "../release-actions";
+import {
+  createRelease,
+  listReleases,
+  parseQuantity,
+  parseTitle,
+  transitionRelease,
+  TITLE_MAX_LENGTH,
+} from "../releases.server";
+import { getOrCreateShop } from "../shop.server";
+import { authenticate } from "../shopify.server";
 
-export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
-
-  return null;
-};
-
-export const action = async ({ request }: ActionFunctionArgs) => {
-  const { admin } = await authenticate.admin(request);
-  const color = ["Red", "Orange", "Yellow", "Green"][
-    Math.floor(Math.random() * 4)
-  ];
-  const response = await admin.graphql(
-    `#graphql
-      mutation populateProduct($product: ProductCreateInput!) {
-        productCreate(product: $product) {
-          product {
-            id
-            title
-            handle
-            status
-            variants(first: 10) {
-              edges {
-                node {
-                  id
-                  price
-                  barcode
-                  createdAt
-                }
-              }
-            }
-          }
-        }
-      }`,
-    {
-      variables: {
-        product: {
-          title: `${color} Snowboard`,
-        },
-      },
-    },
+export const loader = async ({ request, context }: LoaderFunctionArgs) => {
+  const { session } = await authenticate.admin(request);
+  const db = createDb(context.cloudflare.env.DB);
+  const shop = await getOrCreateShop(db, session.shop);
+  const before = Number(new URL(request.url).searchParams.get("before"));
+  const { releases, nextBefore } = await listReleases(
+    db,
+    shop.id,
+    Number.isInteger(before) && before > 0 ? before : undefined,
   );
-  const responseJson = await response.json();
-
-  const product = responseJson.data!.productCreate!.product!;
-  const variantId = product.variants.edges[0]!.node!.id!;
-
-  const variantResponse = await admin.graphql(
-    `#graphql
-    mutation shopifyReactRouterTemplateUpdateVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-        productVariants {
-          id
-          price
-          barcode
-          createdAt
-        }
-      }
-    }`,
-    {
-      variables: {
-        productId: product.id,
-        variants: [{ id: variantId, price: "100.00" }],
-      },
-    },
-  );
-
-  const variantResponseJson = await variantResponse.json();
-
   return {
-    product: responseJson!.data!.productCreate!.product,
-    variant:
-      variantResponseJson!.data!.productVariantsBulkUpdate!.productVariants,
+    word: shop.releaseWordSingular,
+    plural: shop.releaseWordPlural,
+    releases,
+    nextBefore,
+    // One-time token for the create form: a double submit carries the same one.
+    createKey: crypto.randomUUID(),
   };
 };
 
-export default function Index() {
-  const fetcher = useFetcher<typeof action>();
+type ActionData = { ok: boolean; message: string };
 
+const KEY_PATTERN = /^[A-Za-z0-9-]{8,64}$/;
+
+export const action = async ({ request, context }: ActionFunctionArgs) => {
+  const { session } = await authenticate.admin(request);
+  const form = await request.formData();
+  const db = createDb(context.cloudflare.env.DB);
+  const shop = await getOrCreateShop(db, session.shop);
+  const word = shop.releaseWordSingular;
+  const intent = form.get("intent");
+
+  if (intent === "create") {
+    const key = form.get("key");
+    const title = parseTitle(form.get("title"));
+    const quantity = parseQuantity(form.get("quantity"));
+    if (typeof key !== "string" || !KEY_PATTERN.test(key)) {
+      return {
+        ok: false,
+        message: "Reload the page and try again.",
+      } satisfies ActionData;
+    }
+    if (!title) {
+      return {
+        ok: false,
+        message: `Enter a title of up to ${TITLE_MAX_LENGTH} characters.`,
+      } satisfies ActionData;
+    }
+    if ("error" in quantity) {
+      return {
+        ok: false,
+        message: "Quantity must be a whole number, or empty for no cap.",
+      } satisfies ActionData;
+    }
+    const { created } = await createRelease(db, shop.id, {
+      key,
+      title,
+      quantity: quantity.quantity,
+    });
+    return {
+      ok: true,
+      message: created
+        ? `${capitalize(word)} created.`
+        : `That ${word} was already created.`,
+    } satisfies ActionData;
+  }
+
+  const releaseId = form.get("releaseId");
+  if (!isReleaseAction(intent) || typeof releaseId !== "string") {
+    return { ok: false, message: "Unknown action." } satisfies ActionData;
+  }
+  return transitionRelease(db, shop.id, releaseId, intent, word);
+};
+
+const BUTTON_LABEL: Record<ReleaseAction, string> = {
+  announce: "Announce pre-order",
+  ready: "Ready to ship",
+  ship: "Mark as shipped",
+  cancel: "Cancel",
+};
+
+const BADGE_TONE = {
+  UNANNOUNCED: "neutral",
+  PREORDER: "info",
+  READY: "warning",
+  SHIPPED: "success",
+  CANCELLED: "critical",
+} as const;
+
+const STATUS_TEXT = {
+  UNANNOUNCED: "Unannounced",
+  PREORDER: "Pre-order",
+  READY: "Ready to ship",
+  SHIPPED: "Shipped",
+  CANCELLED: "Cancelled",
+} as const;
+
+const day = (date: Date | null) =>
+  date ? date.toISOString().slice(0, 10) : null;
+
+export default function Releases() {
+  const { word, plural, releases, nextBefore, createKey } =
+    useLoaderData<typeof loader>();
+  const fetcher = useFetcher<ActionData>();
   const shopify = useAppBridge();
-  const isLoading =
-    ["loading", "submitting"].includes(fetcher.state) &&
-    fetcher.formMethod === "POST";
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const [cancelling, setCancelling] = useState<{
+    id: string;
+    label: string;
+  } | null>(null);
+  const busy = fetcher.state !== "idle";
+  const heading = capitalize(plural);
 
   useEffect(() => {
-    if (fetcher.data?.product?.id) {
-      shopify.toast.show("Product created");
+    if (fetcher.data) {
+      shopify.toast.show(fetcher.data.message, { isError: !fetcher.data.ok });
     }
-  }, [fetcher.data?.product?.id, shopify]);
+  }, [fetcher.data, shopify]);
 
-  const generateProduct = () => fetcher.submit({}, { method: "POST" });
+  const act = (intent: ReleaseAction, releaseId: string) =>
+    fetcher.submit({ intent, releaseId }, { method: "POST" });
 
   return (
-    <s-page heading="Shopify app template">
-      <s-button slot="primary-action" onClick={generateProduct}>
-        Generate a product
-      </s-button>
-
-      <s-section heading="Congrats on creating a new Shopify app 🎉">
-        <s-paragraph>
-          This embedded app template uses{" "}
-          <s-link
-            href="https://shopify.dev/docs/apps/tools/app-bridge"
-            target="_blank"
-          >
-            App Bridge
-          </s-link>{" "}
-          interface examples like an{" "}
-          <s-link href="/app/additional">additional page in the app nav</s-link>
-          , as well as an{" "}
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql"
-            target="_blank"
-          >
-            Admin GraphQL
-          </s-link>{" "}
-          mutation demo, to provide a starting point for app development.
-        </s-paragraph>
-      </s-section>
-      <s-section heading="Get started with products">
-        <s-paragraph>
-          Generate a product with GraphQL and get the JSON output for that
-          product. Learn more about the{" "}
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql/latest/mutations/productCreate"
-            target="_blank"
-          >
-            productCreate
-          </s-link>{" "}
-          mutation in our API references.
-        </s-paragraph>
-        <s-stack direction="inline" gap="base">
-          <s-button
-            onClick={generateProduct}
-            {...(isLoading ? { loading: true } : {})}
-          >
-            Generate a product
-          </s-button>
-          {fetcher.data?.product && (
-            <s-button
-              onClick={() => {
-                shopify.intents.invoke?.("edit:shopify/Product", {
-                  value: fetcher.data?.product?.id,
-                });
-              }}
-              target="_blank"
-              variant="tertiary"
-            >
-              Edit product
-            </s-button>
-          )}
-        </s-stack>
-        {fetcher.data?.product && (
-          <s-section heading="productCreate mutation">
-            <s-stack direction="block" gap="base">
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <pre style={{ margin: 0 }}>
-                  <code>{JSON.stringify(fetcher.data.product, null, 2)}</code>
-                </pre>
-              </s-box>
-
-              <s-heading>productVariantsBulkUpdate mutation</s-heading>
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <pre style={{ margin: 0 }}>
-                  <code>{JSON.stringify(fetcher.data.variant, null, 2)}</code>
-                </pre>
-              </s-box>
+    <s-page heading={heading}>
+      <s-section heading={`New ${word}`}>
+        {/* Keyed on the token, so the form clears when a new one arrives. */}
+        <fetcher.Form method="post" key={createKey}>
+          <input type="hidden" name="intent" value="create" />
+          <input type="hidden" name="key" value={createKey} />
+          <s-stack gap="base">
+            <s-text-field label="Title" name="title" required />
+            <s-number-field
+              label="Quantity"
+              name="quantity"
+              min={1}
+              details="Optional. Leave empty for no cap."
+            />
+            <s-stack direction="inline">
+              <s-button type="submit" {...(busy ? { loading: true } : {})}>
+                Create {word}
+              </s-button>
             </s-stack>
-          </s-section>
+          </s-stack>
+        </fetcher.Form>
+      </s-section>
+
+      <s-section padding="none">
+        {releases.length === 0 && nextBefore === null ? (
+          <s-box padding="base">
+            <s-paragraph>
+              No {plural} yet. Create the first one above.
+            </s-paragraph>
+          </s-box>
+        ) : (
+          <s-table
+            paginate={nextBefore !== null || searchParams.has("before")}
+            hasNextPage={nextBefore !== null}
+            hasPreviousPage={searchParams.has("before")}
+            onNextPage={() => navigate(`?before=${nextBefore}`)}
+            onPreviousPage={() => navigate(-1)}
+          >
+            <s-table-header-row>
+              <s-table-header>No.</s-table-header>
+              <s-table-header>Title</s-table-header>
+              <s-table-header>Status</s-table-header>
+              <s-table-header>Quantity</s-table-header>
+              <s-table-header>Actions</s-table-header>
+            </s-table-header-row>
+            <s-table-body>
+              {releases.map((release) => (
+                <s-table-row key={release.id}>
+                  <s-table-cell>{release.number}</s-table-cell>
+                  <s-table-cell>{release.title}</s-table-cell>
+                  <s-table-cell>
+                    <s-stack gap="small-300">
+                      <s-badge tone={BADGE_TONE[release.status]}>
+                        {STATUS_TEXT[release.status]}
+                      </s-badge>
+                      {day(release.preorderOpensAt) && (
+                        <s-text color="subdued">
+                          Announced {day(release.preorderOpensAt)}
+                        </s-text>
+                      )}
+                      {day(release.cutoffAt) && (
+                        <s-text color="subdued">
+                          Ready {day(release.cutoffAt)}
+                        </s-text>
+                      )}
+                    </s-stack>
+                  </s-table-cell>
+                  <s-table-cell>{release.quantity ?? "No cap"}</s-table-cell>
+                  <s-table-cell>
+                    <s-stack direction="inline" gap="small">
+                      {actionsFor(release.status).map((name) =>
+                        name === "cancel" ? (
+                          <s-button
+                            key={name}
+                            tone="critical"
+                            commandFor="cancel-modal"
+                            command="--show"
+                            onClick={() =>
+                              setCancelling({
+                                id: release.id,
+                                label: `${release.number}. ${release.title}`,
+                              })
+                            }
+                          >
+                            {BUTTON_LABEL[name]}
+                          </s-button>
+                        ) : (
+                          <s-button
+                            key={name}
+                            variant={name === "ship" ? "secondary" : "primary"}
+                            {...(busy ? { disabled: true } : {})}
+                            onClick={() => act(name, release.id)}
+                          >
+                            {BUTTON_LABEL[name]}
+                          </s-button>
+                        ),
+                      )}
+                    </s-stack>
+                  </s-table-cell>
+                </s-table-row>
+              ))}
+            </s-table-body>
+          </s-table>
         )}
       </s-section>
 
-      <s-section slot="aside" heading="App template specs">
+      <s-modal id="cancel-modal" heading={`Cancel this ${word}?`}>
         <s-paragraph>
-          <s-text>Framework: </s-text>
-          <s-link href="https://reactrouter.com/" target="_blank">
-            React Router
-          </s-link>
+          {cancelling?.label} will be cancelled and can&apos;t be brought back.
         </s-paragraph>
-        <s-paragraph>
-          <s-text>Interface: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/api/app-home/using-polaris-components"
-            target="_blank"
-          >
-            Polaris web components
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>API: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql"
-            target="_blank"
-          >
-            GraphQL
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Database: </s-text>
-          <s-link href="https://www.prisma.io/" target="_blank">
-            Prisma
-          </s-link>
-        </s-paragraph>
-      </s-section>
-
-      <s-section slot="aside" heading="Next steps">
-        <s-unordered-list>
-          <s-list-item>
-            Build an{" "}
-            <s-link
-              href="https://shopify.dev/docs/apps/getting-started/build-app-example"
-              target="_blank"
-            >
-              example app
-            </s-link>
-          </s-list-item>
-          <s-list-item>
-            Explore Shopify&apos;s API with{" "}
-            <s-link
-              href="https://shopify.dev/docs/apps/tools/graphiql-admin-api"
-              target="_blank"
-            >
-              GraphiQL
-            </s-link>
-          </s-list-item>
-        </s-unordered-list>
-      </s-section>
+        <s-button
+          slot="primary-action"
+          variant="primary"
+          tone="critical"
+          commandFor="cancel-modal"
+          command="--hide"
+          onClick={() => cancelling && act("cancel", cancelling.id)}
+        >
+          Cancel {word}
+        </s-button>
+        <s-button
+          slot="secondary-actions"
+          commandFor="cancel-modal"
+          command="--hide"
+        >
+          Keep it
+        </s-button>
+      </s-modal>
     </s-page>
   );
 }
