@@ -5,7 +5,7 @@ This file is the build-facing summary. Settled product decisions live in `DECISI
 
 ## What we are building
 
-A Shopify app for subscriptions sold as releases. A release moves from unannounced to pre-order to ready to ship, either when the merchant presses a button (default) or on scheduled dates; it can also have a quantity. Every plan takes its initial charge at sign-up. After that, a plan is either pay-per-release (the first release's order is generated at checkout with the sign-up charge; each later release is charged at the same moment its order is created, by default when it starts shipping) or a prepaid bundle of releases with its own display name ("Yearly subscription", "2 issues paid upfront"). A bundle renews on its term date, for example 1 year after sign-up, but if its last paid release is late, the renewal is charged when that release's order is created. The renewal rule is a per-plan setting.
+A Shopify app for subscriptions sold as releases. A release moves from unannounced to pre-order to ready to ship, either when the merchant presses a button (default) or on scheduled dates; it can also have a quantity. Every plan takes its initial charge at sign-up. After that, a plan is either pay-per-release (each later release is charged at the same moment its order is created, by default when it starts shipping) or a prepaid bundle of releases with its own display name ("Yearly subscription", "2 issues paid upfront"). A bundle renews on its term date, for example 1 year after sign-up, but if its last paid release is late, the renewal is charged when that release's order is created. The renewal rule is a per-plan setting.
 
 Shopify holds the checkout, the saved card, the subscription contract and the orders. The app owns the release calendar, when each subscriber is charged, who receives each release, the customer portal and the merchant admin.
 
@@ -62,7 +62,7 @@ Draft Prisma models are in `prisma/schema.draft.prisma`.
 
 | Situation | What the app does |
 | --- | --- |
-| Sign-up between issues | Before the next pre-order opens: latest released issue, shipped now. After: the pre-order issue |
+| Sign-up between issues | Before the next pre-order opens: latest released issue, order generated at checkout and shipped now. After: the pre-order issue, charged at sign-up, order created when shipping starts along with existing subscribers' orders |
 | Last paid release is late past the renewal date | Renewal is held and charged when that release's order is created; subscriber gets a notice |
 | Release cancelled | Doesn't count against paid releases |
 | Extra release before a bundle's renewal date | Not included; renewal stays on the term date and the new term starts with the next release. A bundle buys N releases, not every release in 12 months |
