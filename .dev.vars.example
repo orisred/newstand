@@ -1,0 +1,5 @@
+# Copy to .dev.vars. The client secret comes from `shopify app env show`.
+SHOPIFY_API_SECRET=
+# The public URL of your local Worker, such as a tunnel to `wrangler dev`.
+# `shopify app dev` overrides this with its own tunnel.
+SHOPIFY_APP_URL=http://localhost:8787

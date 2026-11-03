@@ -20,11 +20,23 @@ Shopify's selling plan anchors only repeat on a weekday, a day of the month or a
 
 ## Getting started
 
-1. Install the Shopify CLI and log in with a Shopify Partner account.
-2. Scaffold the app into this repo: `shopify app init --template=https://github.com/Shopify/shopify-app-template-react-router` (merge the generated files with this folder; keep `docs/` and `AGENTS.md`).
-3. Port the template to Workers: add `wrangler.jsonc` with D1, KV and Queue bindings, switch the build to `@cloudflare/vite-plugin`, replace Node-only rendering (`renderToPipeableStream`) with `renderToReadableStream`, and swap Prisma session storage for the KV adapter.
-4. Replace the template's Prisma schema with `prisma/schema.draft.prisma`. Generate SQL with `prisma migrate diff` and apply it with `wrangler d1 migrations apply`.
-5. Create a development store and run `shopify app dev`.
+1. Install the Shopify CLI and log in with a Shopify Partner account. Log in to Cloudflare with `npx wrangler login`.
+2. Run `npm install`, which also generates the Prisma client into `app/generated/`.
+3. Copy `.dev.vars.example` to `.dev.vars` and fill in the client secret from `shopify app env show`.
+4. Run `npm run dev` (`shopify app dev`). It applies D1 migrations locally and runs the app in `workerd` through Vite.
+
+To run the built Worker instead, use `npm run build`, `npm run db:migrate:local` and `npx wrangler dev`. It needs a public URL for Shopify to reach, such as `npx wrangler tunnel quick-start http://localhost:8787`, set as `SHOPIFY_APP_URL` in `.dev.vars` before the build and as `application_url` in `shopify.app.toml`.
+
+## Deploying
+
+- Worker: `npm run db:migrate:remote`, then `npm run deploy:worker`. The client secret is stored with `wrangler secret put SHOPIFY_API_SECRET`.
+- App configuration (URLs, webhooks, scopes): `npm run deploy` (`shopify app deploy`).
+- `SHOPIFY_APP_URL` and `SCOPES` in `wrangler.jsonc` must match `application_url` and `access_scopes.scopes` in `shopify.app.toml`.
+- `shopify app dev` leaves a dev preview on the store that overrides `application_url`. Run `shopify app dev clean` when you finish, or the store keeps using the dead tunnel.
+
+## Database changes
+
+Edit `prisma/schema.prisma`, then generate the next SQL file with `npx prisma migrate diff`, save it as `migrations/NNNN_name.sql`, and apply it with `wrangler d1 migrations apply`. `prisma migrate deploy` doesn't work on D1. Check the SQL before applying it: Prisma writes JSON defaults unquoted, which is invalid.
 
 Then follow `docs/BUILD_STEPS.md`, one agent thread per step.
 

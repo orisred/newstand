@@ -34,6 +34,13 @@ jobs:
 
       - name: Validate Prisma
         run: npx prisma generate && npx prisma validate
+        env:
+          # The schema reads it, but D1 connects through the adapter and never uses it.
+          DATABASE_URL: file:./unused.db
 
       - name: Build application
         run: npm run build
+
+      - name: Run tests
+        if: ${{ matrix.manager == 'npm' }}
+        run: npm test

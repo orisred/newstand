@@ -1,0 +1,54 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "release-subscriptions",
+  "main": "./workers/app.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "workers_dev": true,
+  // Preview URLs would be public and share the production D1, KV and queue.
+  "preview_urls": false,
+  "vars": {
+    // client_id in shopify.app.toml. Public, so it isn't a secret.
+    "SHOPIFY_API_KEY": "7f0c96d4f07d154d0a5cbedaed311900",
+    // Keep in step with application_url in shopify.app.toml.
+    "SHOPIFY_APP_URL": "https://release-subscriptions.ne-dev.workers.dev",
+    // Keep in step with access_scopes.scopes in shopify.app.toml.
+    "SCOPES": "write_products",
+    "SHOP_CUSTOM_DOMAIN": ""
+  },
+  // Set with `wrangler secret put` for production and in .dev.vars locally:
+  //   SHOPIFY_API_SECRET
+  "secrets": { "required": ["SHOPIFY_API_SECRET"] },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "release-subscriptions",
+      "database_id": "9439f776-4617-4e6a-9755-b4a383b7a828",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "SESSIONS",
+      "id": "81742b22b22848d3b9b840fb033f81d1"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "JOBS",
+        "queue": "release-subscriptions-jobs"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "release-subscriptions-jobs"
+      }
+    ]
+  },
+  "triggers": {
+    // Hourly tick: the scheduled handler finds due work and enqueues it.
+    "crons": ["0 * * * *"]
+  }
+}

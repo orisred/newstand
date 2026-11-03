@@ -1,34 +1,227 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
+// App models for Cloudflare D1 (SQLite) via @prisma/adapter-d1.
+// Sessions live in KV, so the template's Session model is not needed.
+// Migrations: prisma migrate diff -> migrations/NNNN_name.sql -> wrangler d1 migrations apply.
+// migrate diff writes JSON defaults unquoted, which is invalid SQL: quote them by hand.
 
+// prisma-client-js can't be bundled for Workers by Vite, so this generates into the app.
 generator client {
-  provider = "prisma-client-js"
+  provider     = "prisma-client"
+  output       = "../app/generated/prisma"
+  runtime      = "workerd"
+  moduleFormat = "esm"
+  engineType   = "client"
 }
 
-// Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long
-// enough when changing adapters.
-// See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
 datasource db {
   provider = "sqlite"
-  url      = "file:dev.sqlite"
+  url      = env("DATABASE_URL")
 }
 
-model Session {
-  id            String    @id
-  shop          String
-  state         String
-  isOnline      Boolean   @default(false)
-  scope         String?
-  expires       DateTime?
-  accessToken   String
-  userId        BigInt?
-  firstName     String?
-  lastName      String?
-  email         String?
-  accountOwner  Boolean   @default(false)
-  locale        String?
-  collaborator  Boolean?  @default(false)
-  emailVerified Boolean?  @default(false)
-  refreshToken        String?
-  refreshTokenExpires DateTime?
+model Shop {
+  id                   String         @id @default(cuid())
+  shopDomain           String         @unique
+  releaseWordSingular  String         @default("issue")
+  releaseWordPlural    String         @default("issues")
+  allowedCountries     Json           @default("[\"US\"]")
+  memberDiscountTag    String?        @default("active-subscriber")
+  orderTiming          OrderTiming    @default(READY_TO_SHIP)
+  emailsEnabled        Json           @default("{}")
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+  releases             Release[]
+  plans                Plan[]
+  subscriptions        Subscription[]
+  events               Event[]
+}
+
+enum ReleaseStatus {
+  UNANNOUNCED // exists, no dates yet
+  PREORDER    // announced; new subscribers switch to it (under PREORDER_SWITCHOVER)
+  READY       // ready to ship; subscribers' orders created (under READY_TO_SHIP timing)
+  SHIPPED
+  CANCELLED
+}
+
+enum OrderTiming {
+  READY_TO_SHIP   // create subscribers' $0 orders when the merchant marks the release ready (default)
+  PREORDER_OPENS  // create them when the pre-order is announced
+}
+
+enum TriggerMode {
+  MANUAL     // merchant presses "Announce pre-order" / "Ready to ship"
+  SCHEDULED  // fires at preorderOpensAt / cutoffAt
+}
+
+model Release {
+  id           String        @id @default(cuid())
+  shopId       String
+  shop         Shop          @relation(fields: [shopId], references: [id])
+  number       Int
+  title        String
+  productGid   String?       // Shopify product or variant for this release's $0 orders
+  preorderOpensAt DateTime?  // switchover; null until announced
+  cutoffAt     DateTime?     // ready to ship; null until known
+  shipAt       DateTime?
+  triggerMode  TriggerMode   @default(MANUAL)
+  quantity     Int?          // optional cap; null = no cap
+  status       ReleaseStatus @default(UNANNOUNCED)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  deliveries   Delivery[]
+
+  @@unique([shopId, number])
+  @@index([shopId, cutoffAt])
+}
+
+enum BillingMode {
+  PER_RELEASE     // first charge at sign-up; then charged when each release's order is created (follows Shop.orderTiming)
+  PREPAID_BUNDLE  // releasesPerTerm paid upfront
+}
+
+enum RenewalRule {
+  TERM_DATE_HOLD_IF_LATE // renew at term end, but wait for the last paid release's order (default)
+  TERM_DATE              // renew at term end regardless
+  ON_DEPLETION           // renew when paid releases run out
+}
+
+enum StartRule {
+  PREORDER_SWITCHOVER       // latest release whose pre-order has opened; ships now if already released
+  CURRENT_IF_BEFORE_CUTOFF
+  NEXT
+}
+
+model Plan {
+  id               String         @id @default(cuid())
+  shopId           String
+  shop             Shop           @relation(fields: [shopId], references: [id])
+  name             String
+  displayName      String         // shown to customers, e.g. "Yearly subscription"
+  sellingPlanGid   String?        @unique
+  billingMode      BillingMode    @default(PREPAID_BUNDLE)
+  releasesPerTerm  Int            @default(1)
+  termMonths       Int?           // e.g. 12 for a yearly bundle; null for per-release
+  renewalRule      RenewalRule    @default(TERM_DATE_HOLD_IF_LATE)
+  priceCents       Int
+  currency         String         @default("USD")
+  autoRenew        Boolean        @default(true)
+  startRule        StartRule      @default(PREORDER_SWITCHOVER)
+  giftable         Boolean        @default(false)
+  active           Boolean        @default(true)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  subscriptions    Subscription[]
+  priceChanges     PriceChange[]
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAUSED
+  CANCELLED // auto-renew off; remaining paid releases still ship
+  ENDED
+}
+
+enum SubscriptionSource {
+  NEW
+  GIFT
+  IMPORTED
+}
+
+model Subscription {
+  id                 String             @id @default(cuid())
+  shopId             String
+  shop               Shop               @relation(fields: [shopId], references: [id])
+  planId             String
+  plan               Plan               @relation(fields: [planId], references: [id])
+  contractGid        String?            @unique
+  customerGid        String
+  status             SubscriptionStatus @default(ACTIVE)
+  source             SubscriptionSource @default(NEW)
+  releasesRemaining  Int
+  termEndsAt         DateTime?          // bundle renewal date before any late-release hold
+  nextReleaseId      String?
+  lockedPriceCents   Int?
+  giftBuyerGid       String?
+  giftMessage        String?
+  pausedReason       String?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  deliveries         Delivery[]
+  billingAttempts    BillingAttempt[]
+  events             Event[]
+
+  @@index([shopId, status])
+  @@index([customerGid])
+}
+
+enum DeliveryStatus {
+  PENDING      // assigned, order not yet created
+  ORDERED      // $0 order created at cutoff
+  HELD         // subscription paused at cutoff; ships late once paid
+  FULFILLED
+  CANCELLED
+}
+
+model Delivery {
+  id              String         @id @default(cuid())
+  subscriptionId  String
+  subscription    Subscription   @relation(fields: [subscriptionId], references: [id])
+  releaseId       String
+  release         Release        @relation(fields: [releaseId], references: [id])
+  orderGid        String?        @unique
+  status          DeliveryStatus @default(PENDING)
+  addressConfirmedAt DateTime?   // from the pre-order email's main CTA
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@unique([subscriptionId, releaseId])
+}
+
+enum BillingResult {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+
+model BillingAttempt {
+  id               String        @id @default(cuid())
+  subscriptionId   String
+  subscription     Subscription  @relation(fields: [subscriptionId], references: [id])
+  idempotencyKey   String        @unique // subscriptionId:releaseId:attempt
+  attempt          Int
+  shopifyAttemptGid String?      @unique
+  result           BillingResult @default(PENDING)
+  errorCode        String?
+  nextRetryAt      DateTime?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+}
+
+enum PriceChangePolicy {
+  KEEP_OLD_PRICE
+  APPLY_AT_RENEWAL
+}
+
+model PriceChange {
+  id             String            @id @default(cuid())
+  planId         String
+  plan           Plan              @relation(fields: [planId], references: [id])
+  newPriceCents  Int
+  policy         PriceChangePolicy
+  effectiveAt    DateTime
+  noticeSentAt   DateTime?
+  createdAt      DateTime          @default(now())
+}
+
+model Event {
+  id              String        @id @default(cuid())
+  shopId          String
+  shop            Shop          @relation(fields: [shopId], references: [id])
+  subscriptionId  String?
+  subscription    Subscription? @relation(fields: [subscriptionId], references: [id])
+  type            String
+  payload         Json
+  sentToFlowAt    DateTime?
+  createdAt       DateTime      @default(now())
+
+  @@index([shopId, type, createdAt])
 }
