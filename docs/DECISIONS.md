@@ -36,9 +36,21 @@ All decided by N on 2026-11-01. "Cake Zine" is the first merchant's behavior; "P
 | --- | --- |
 | Framework | Shopify app template (React Router), Polaris web components, App Bridge, Prisma |
 | Hosting | Cloudflare Workers (Paid, $5/month); chosen 2026-11-03 over Fly.io + Neon because it is cheapest at App Store scale |
-| Database | D1 (SQLite) via Prisma D1 adapter; sessions in KV |
+| Database | D1 (SQLite) via Prisma D1 adapter, including sessions (see the note below; was KV until 2026-11-03) |
 | Jobs | Hourly Cron Trigger + Cloudflare Queues |
 | Coding tool | T3 Code |
+
+### Offline tokens moved from KV to D1 (2026-11-03)
+
+Background jobs depend on Shopify's expiring offline tokens, so Step 3 tested them on `newstand-dev`.
+
+- **Safe:** two refreshes at once, or a refresh from a stale read. The old refresh token keeps working until its successor is used, and it returns the same successor.
+- **Safe, as far as tested:** two token exchanges at once. In 2 of 2 rounds on a cold token they returned the same token, and in 3 more on a fresh one both results still refreshed. Both used one ID token, because App Bridge returned the same one. Shopify doesn't document this, so it could change. It's why nothing stops the admin's parallel loaders from each running an exchange on first load.
+- **Not safe:** a refresh racing a token exchange. In 2 of 3 rounds both returned 200 but the refresh's new refresh token was already dead, and in the third the refresh itself got a 401. If the dead token is stored last, jobs fail once the access token expires, until the merchant next opens the app. An exchange on a token that has gone cold also retires the previous refresh token straight away.
+
+The library ran an exchange whenever an admin request found a token within 5 minutes of expiry, and a job refreshing at that moment could hit this race. So `app/session-storage.server.ts` now refreshes on load, for admin requests and jobs alike, and an exchange only happens when there's no session or Shopify rejects the refresh token. This departs from Shopify's advice to use a token exchange during an active merchant session, because that advice is what makes the race possible.
+
+Sessions moved to D1 because the KV adapter doesn't fit refreshing: its per-shop list grows on every store and is read key by key on uninstall, and KV limits writes to one per second per key, which two parallel loaders can exceed. D1 has neither problem and no stale reads. The cost is one small D1 read per `authenticate.admin` call.
 
 ## Cake Zine facts
 

@@ -5,7 +5,7 @@ import {
   AppDistribution,
   shopifyApp,
 } from "@shopify/shopify-app-react-router/server";
-import { KVSessionStorage } from "@shopify/shopify-app-session-storage-kv";
+import { D1SessionStorage } from "./session-storage.server";
 
 const shopify = shopifyApp({
   apiKey: env.SHOPIFY_API_KEY,
@@ -14,7 +14,10 @@ const shopify = shopifyApp({
   scopes: env.SCOPES.split(","),
   appUrl: env.SHOPIFY_APP_URL,
   authPathPrefix: "/auth",
-  sessionStorage: new KVSessionStorage(env.SESSIONS),
+  sessionStorage: new D1SessionStorage(env.DB, {
+    apiKey: env.SHOPIFY_API_KEY,
+    apiSecretKey: env.SHOPIFY_API_SECRET,
+  }),
   distribution: AppDistribution.AppStore,
   future: {
     expiringOfflineAccessTokens: true,

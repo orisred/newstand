@@ -6,7 +6,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
   "workers_dev": true,
-  // Preview URLs would be public and share the production D1, KV and queue.
+  // Preview URLs would be public and share the production D1 and queue.
   "preview_urls": false,
   "vars": {
     // client_id in shopify.app.toml. Public, so it isn't a secret.
@@ -28,12 +28,6 @@
       "migrations_dir": "migrations"
     }
   ],
-  "kv_namespaces": [
-    {
-      "binding": "SESSIONS",
-      "id": "81742b22b22848d3b9b840fb033f81d1"
-    }
-  ],
   "queues": {
     "producers": [
       {
@@ -43,7 +37,15 @@
     ],
     "consumers": [
       {
-        "queue": "release-subscriptions-jobs"
+        "queue": "release-subscriptions-jobs",
+        "max_retries": 5,
+        "dead_letter_queue": "release-subscriptions-jobs-dlq"
+      },
+      {
+        // Only records dead jobs, and has no dead-letter queue of its own, so try for longer.
+        "queue": "release-subscriptions-jobs-dlq",
+        "max_retries": 10,
+        "retry_delay": 300
       }
     ]
   },

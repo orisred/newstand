@@ -1,4 +1,6 @@
 import { createRequestHandler } from "react-router";
+import { dueWorkFinders, jobHandlers } from "../app/jobs/registry.server";
+import { consumeDeadJobs, consumeJobs, runTick } from "../app/jobs/runner.server";
 
 declare module "react-router" {
   export interface AppLoadContext {
@@ -19,16 +21,13 @@ export default {
     return requestHandler(request, { cloudflare: { env, ctx } });
   },
 
-  // Step 3 replaces these two stubs. They exist so the Cron Trigger and the
-  // queue consumer have a handler to call.
-  scheduled(controller) {
-    console.log(`Tick ${controller.cron}: no jobs are defined yet`);
+  scheduled(controller, env) {
+    return runTick(env, controller, dueWorkFinders);
   },
 
-  queue(batch) {
-    console.error(
-      `Queue ${batch.queue}: no consumer yet, retrying ${batch.messages.length} message(s)`,
-    );
-    batch.retryAll();
+  queue(batch, env) {
+    return batch.queue.endsWith("-dlq")
+      ? consumeDeadJobs(batch, env)
+      : consumeJobs(batch, env, jobHandlers);
   },
 } satisfies ExportedHandler<Env>;
