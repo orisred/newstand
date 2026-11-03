@@ -5,3 +5,17 @@ node_modules/
 .dev.vars
 build/
 *.db
+
+# From the Shopify React Router template
+.DS_Store
+/.cache
+/app/build
+/public/build/
+/public/_dev
+/prisma/dev.sqlite
+/prisma/dev.sqlite-journal
+database.sqlite
+/extensions/*/dist
+.shopify/*
+.shopify.lock
+.react-router/
