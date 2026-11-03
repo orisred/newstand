@@ -6,9 +6,10 @@ All decided by N on 2026-11-01. "Cake Zine" is the first merchant's behavior; "P
 | --- | --- | --- |
 | What a subscription buys | Pay per issue, or a prepaid bundle (e.g. 2 issues) | Billing mode per plan; a bundle has its own display name, such as "Yearly subscription" or "2 issues paid upfront" |
 | First release | Switches when the next issue's pre-order is announced: before, the latest released issue (ships now); after, the pre-order issue | Start rule per plan: pre-order switchover (default), current release if before its cutoff, or always next |
-| Renewal timing (bundles) | Term date (1 year after sign-up), held until the last paid issue's order is created if that issue is late | Renewal rule per plan: term date with late hold (default), term date only, or when paid releases run out |
+| Initial charge | At sign-up, on every plan (N, 2026-11-03) | Same |
+| Renewal timing (bundles) | Term date (1 year after sign-up, assuming 2 issues a year). If the last paid issue hasn't shipped by then, the renewal is charged when that issue's order is created | Renewal rule per plan: term date with late hold (default), term date only, or when paid releases run out |
 | Extra issue before renewal | Not included; wait for normal renewal (bundle = N issues, not all issues in 12 months) | Same |
-| Renewal timing (per issue) | Charge before each issue's cutoff | Same |
+| Renewal timing (per issue) | Charge and order happen at the same time. First issue: the order is generated at checkout, with the sign-up charge. Later issues: when the issue starts shipping (changed by N on 2026-11-03; was before each issue's cutoff) | Same: the charge follows the shop's order timing setting, with no separate charge setting |
 | Auto-renew | On, with a reminder; opt out anytime | Auto, manual, or subscriber's choice |
 | Orders | One Shopify order per issue, created when the issue is ready to ship | Shop setting: create orders when ready to ship (default) or when the pre-order opens |
 | Release dates | None until the pre-order is announced; the merchant triggers each step by hand | Per release: manual triggers (default) or scheduled dates |

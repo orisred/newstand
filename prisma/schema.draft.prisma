@@ -68,7 +68,7 @@ model Release {
 }
 
 enum BillingMode {
-  PER_RELEASE     // charged before each release's cutoff
+  PER_RELEASE     // first charge at sign-up; then charged when each release's order is created (follows Shop.orderTiming)
   PREPAID_BUNDLE  // releasesPerTerm paid upfront
 }
 
@@ -92,7 +92,6 @@ model Plan {
   displayName      String         // shown to customers, e.g. "Yearly subscription"
   sellingPlanGid   String?        @unique
   billingMode      BillingMode    @default(PREPAID_BUNDLE)
-  perReleaseChargeAt OrderTiming  @default(PREORDER_OPENS) // PER_RELEASE plans: when each release is charged
   releasesPerTerm  Int            @default(1)
   termMonths       Int?           // e.g. 12 for a yearly bundle; null for per-release
   renewalRule      RenewalRule    @default(TERM_DATE_HOLD_IF_LATE)
