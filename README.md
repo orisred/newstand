@@ -34,6 +34,10 @@ To run the built Worker instead, use `npm run build`, `npm run db:migrate:local`
 - A scope change needs both: `npm run deploy` releases it and merchants are asked to approve it in the admin (the `app/scopes_update` webhook then updates the stored session, and a token refresh returns the new scope too). `SHOPIFY_APP_URL` and `SCOPES` in `wrangler.jsonc` must match `application_url` and `access_scopes.scopes` in `shopify.app.toml`.
 - `shopify app dev` leaves a dev preview on the store that overrides `application_url`. Run `shopify app dev clean` when you finish, or the store keeps using the dead tunnel.
 
+## Plan picker block
+
+The theme app extension in `extensions/plan-picker` adds a **Plan picker** app block to the product page. Release it with `npm run deploy`. A merchant adds it in the theme editor: Customize the theme, open a product template, **Add block** on the product information section, choose **Plan picker** under Apps, move it above the buy buttons and save. It shows only this app's plans (`app_id`), with the first chosen, and joins the theme's product form through the `form` attribute, so it needs no JavaScript. The form is assumed to be `product-form-<section id>` (Dawn and its descendants); another theme sets **Product form ID** in the block. Its heading and subscription terms are block settings; empty terms show nothing. A theme that adds its own `selling_plan` to the cart request, or lists selling plans itself, will clash with it (the dev store's theme did, and was patched).
+
 ## Database changes
 
 Edit `prisma/schema.prisma`, then generate the next SQL file with `npx prisma migrate diff`, save it as `migrations/NNNN_name.sql`, and apply it with `wrangler d1 migrations apply`. `prisma migrate deploy` doesn't work on D1. Check the SQL before applying it: Prisma writes JSON defaults unquoted, which is invalid, and it rebuilds a table (drop and copy) for changes that need only `ALTER TABLE ... ADD COLUMN`, so write those by hand (see `migrations/0003_plan_sync.sql`).

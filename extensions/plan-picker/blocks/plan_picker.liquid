@@ -1,0 +1,92 @@
+{%- comment -%}
+  Lists this app's plans for the product and submits the chosen one as `selling_plan` with the
+  theme's product form, so it works with the add to cart and dynamic checkout buttons. The radios
+  join the form through the `form` attribute, so there is no JavaScript. Most themes name the form
+  `product-form-<section id>`; the "Product form ID" setting covers one that doesn't.
+
+  Only plans with this app's `app_id` are shown, so another app's plans never appear here.
+  The app makes a product with plans require one, so there is no one-time option: the first plan
+  is chosen by default.
+{%- endcomment -%}
+{%- liquid
+  assign form_id = block.settings.form_id
+  if form_id == blank
+    assign form_id = 'product-form-' | append: section.id
+  endif
+  assign legend = block.settings.heading
+  assign legend_class = ''
+  if legend == blank
+    assign legend = 'plan_picker.legend' | t
+    assign legend_class = ' plan-picker__legend--hidden'
+  endif
+  assign has_plans = false
+  for group in product.selling_plan_groups
+    if group.app_id == 'release-subscriptions'
+      assign has_plans = true
+    endif
+  endfor
+-%}
+{%- if has_plans -%}
+  {{ 'plan-picker.css' | asset_url | stylesheet_tag }}
+  <fieldset class="plan-picker" {{ block.shopify_attributes }}>
+    <legend class="plan-picker__legend{{ legend_class }}">{{ legend | escape }}</legend>
+    {%- assign first = true -%}
+    {%- for group in product.selling_plan_groups -%}
+      {%- if group.app_id == 'release-subscriptions' -%}
+      {%- for plan in group.selling_plans -%}
+        {%- assign adjustment = plan.price_adjustments.first -%}
+        <label class="plan-picker__option">
+          <input
+            type="radio"
+            name="selling_plan"
+            value="{{ plan.id }}"
+            form="{{ form_id }}"
+            {% if first %}checked{% endif %}
+            {% unless product.available %}disabled{% endunless %}
+          >
+          <span class="plan-picker__name">{{ plan.name | escape }}</span>
+          {%- if adjustment.value_type == 'price' -%}
+            <span class="plan-picker__price">{{ adjustment.value | money }}</span>
+          {%- endif -%}
+        </label>
+        {%- assign first = false -%}
+      {%- endfor -%}
+      {%- endif -%}
+    {%- endfor -%}
+    {%- if block.settings.terms != blank -%}
+      <p class="plan-picker__terms">{{ block.settings.terms | escape }}</p>
+    {%- endif -%}
+  </fieldset>
+{%- elsif request.design_mode -%}
+  <p class="plan-picker__terms" {{ block.shopify_attributes }}>
+    This product has no plans from Release Subscriptions, so the plan picker is hidden. Add a plan to this product in the app.
+  </p>
+{%- endif -%}
+
+{% schema %}
+{
+  "name": "Plan picker",
+  "target": "section",
+  "settings": [
+    {
+      "type": "text",
+      "id": "heading",
+      "label": "Heading",
+      "default": "Choose a plan",
+      "info": "Leave empty to hide it. Screen readers still announce a label."
+    },
+    {
+      "type": "textarea",
+      "id": "terms",
+      "label": "Subscription terms",
+      "info": "Shown under the plans: how often and when customers are billed, that it renews automatically, and how to cancel. Leave empty to show nothing."
+    },
+    {
+      "type": "text",
+      "id": "form_id",
+      "label": "Product form ID",
+      "info": "Leave empty unless your theme's product form isn't named product-form-<section ID>."
+    }
+  ]
+}
+{% endschema %}
