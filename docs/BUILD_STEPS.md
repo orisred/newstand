@@ -30,9 +30,9 @@ Rule of thumb: if a step touches `subscriptionBillingAttemptCreate`, creates ord
 | 12 | Gifts: gift checkout, recipient details and message, no auto-renew, end-of-gift offer, gift to an existing subscriber starts a second subscription | Sonnet 5.5 | Medium | A gift purchase creates a recipient subscription and never charges the buyer again |
 | 13 | Merchant dashboard: subscriber list and detail, address confirmation status per release, revenue per release, churn | Sonnet 5.5 | Medium | Admin pages load in under 1 second on the dev store |
 | 14 | Migration import: rebuild Conjured subscribers from Shopify order history plus the contacts export, dry-run report, create contracts on saved cards | Opus 5.5 | High | Dry run on the dev store matches a hand-checked sample of 20 subscribers |
-| 15 | Hardening review: GDPR webhooks, scopes, idempotency, D1 query count per page, error handling | Opus 5.5 | High | Review findings fixed; GDPR webhooks tested |
-| 16 | Cutover runbook for Cake Zine: switch off Conjured renewals, run import, verify, monitor first renewals | Opus 5.5 | High | Runbook reviewed by N before the next issue's pre-order |
-| 17 | Public listing: Billing API plans, onboarding flow, listing copy and screenshots | Sonnet 5.5 (copy: Haiku 5.5) | Medium | Listing submitted for App Store review |
+| 15 | Hardening review: GDPR webhooks, scopes, idempotency, D1 query count per page, error handling; a plan sync that fails between removing a plan from a product and resetting `requiresSellingPlan` must not leave that product unbuyable; prune `JobRun` | Opus 5.5 | High | Review findings fixed; GDPR webhooks tested |
+| 16 | Cutover runbook for Cake Zine: confirm the plan picker works on Cake Zine's real theme without clashing with its product form, switch off Conjured renewals, run import, verify, monitor first renewals | Opus 5.5 | High | Runbook reviewed by N before the next issue's pre-order |
+| 17 | Public listing: Billing API plans, onboarding flow, listing copy and screenshots; confirm the plan picker works on an unpatched Horizon theme; selling plan management from the admin product page and an in-product way for buyers to cancel, as Shopify's App Store requirements ask | Sonnet 5.5 (copy: Haiku 5.5) | Medium | Listing submitted for App Store review |
 
 ## Small tasks between steps
 

@@ -1,0 +1,7 @@
+.plan-picker { border: 0; margin: 0 0 1rem; padding: 0; }
+.plan-picker__legend { padding: 0; margin-bottom: 0.5rem; font-weight: 600; }
+.plan-picker__legend--hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.plan-picker__option { display: flex; align-items: center; gap: 0.6rem; padding: 0.6rem 0; cursor: pointer; }
+.plan-picker__option:has(input:disabled) { opacity: 0.6; cursor: not-allowed; }
+.plan-picker__name { flex: 1; }
+.plan-picker__terms { margin: 0.5rem 0 0; font-size: 0.9em; opacity: 0.8; }

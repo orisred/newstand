@@ -287,7 +287,11 @@ export default function PlanForm() {
             <s-stack gap="base">
               <s-paragraph>
                 The product customers subscribe on. The plan appears in its
-                purchase options.
+                purchase options. While it has a plan, the product can only be
+                bought with one, so it cannot be bought as a one-time purchase.
+                It must be a physical product, so checkout asks for a shipping
+                address. If you turn off its last plan, it goes back to selling
+                normally.
               </s-paragraph>
               <s-stack direction="inline" gap="base" alignItems="center">
                 <s-button onClick={pickProduct}>

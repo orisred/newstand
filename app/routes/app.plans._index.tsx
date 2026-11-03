@@ -226,6 +226,8 @@ export default function Plans() {
           A plan that is off disappears from its product, so no one new can buy
           it. Nothing is deleted: customers already on it keep their {plural},
           and turning it on puts it back. A new price applies to new sign-ups.
+          While a product has a plan, it can only be bought with one. When its
+          last plan is turned off, it goes back to selling normally.
         </s-paragraph>
       </s-section>
     </s-page>

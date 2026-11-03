@@ -29,6 +29,12 @@ export function graphqlOf(admin: {
 /** The name of the option customers pick between on a product. Not a release word. */
 export const GROUP_OPTION_NAME = "Subscription";
 
+/**
+ * Set on every group. Liquid exposes it as `selling_plan_group.app_id`, which is how the theme
+ * block shows only this app's plans. The block compares against the same string.
+ */
+export const SELLING_PLAN_APP_ID = "release-subscriptions";
+
 /** Long enough for a sync to finish; short enough that a crashed one doesn't block a retry. */
 const LEASE_MS = 2 * 60 * 1000;
 
@@ -102,6 +108,7 @@ function sellingPlanFields(plan: SyncablePlan) {
 export function groupCreateInput(plan: SyncablePlan) {
   return {
     name: plan.displayName,
+    appId: SELLING_PLAN_APP_ID,
     merchantCode: plan.id,
     options: [GROUP_OPTION_NAME],
     sellingPlansToCreate: [sellingPlanFields(plan)],
@@ -111,12 +118,13 @@ export function groupCreateInput(plan: SyncablePlan) {
 export function groupUpdateInput(plan: SyncablePlan, sellingPlanGid: string) {
   return {
     name: plan.displayName,
+    appId: SELLING_PLAN_APP_ID,
     sellingPlansToUpdate: [{ id: sellingPlanGid, ...sellingPlanFields(plan) }],
   };
 }
 
 const GROUP_FIELDS = `
-  id name merchantCode options
+  id name appId merchantCode options
   sellingPlans(first: 10) { nodes {
     id name options category
     billingPolicy { ... on SellingPlanRecurringBillingPolicy { interval intervalCount minCycles maxCycles } }
@@ -169,9 +177,30 @@ const REMOVE_PRODUCTS = `#graphql
     }
   }`;
 
+const PRODUCT_STATE = `#graphql
+  query PlanProducts($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      ... on Product {
+        id
+        requiresSellingPlan
+        sellingPlanGroupsCount { count }
+        variants(first: 100) { nodes { inventoryItem { requiresShipping } } }
+      }
+    }
+  }`;
+
+const SET_REQUIRES_PLAN = `#graphql
+  mutation PlanProductRequires($product: ProductUpdateInput!) {
+    productUpdate(product: $product) {
+      product { id }
+      userErrors { message }
+    }
+  }`;
+
 export type ShopifyGroup = {
   id: string;
   name: string;
+  appId: string | null;
   merchantCode: string | null;
   options: string[];
   sellingPlans: {
@@ -213,6 +242,7 @@ export function describeDifferences(
 
   check("Group name", group.name, plan.displayName);
   check("Group code", group.merchantCode, plan.id);
+  check("Group app ID", group.appId, SELLING_PLAN_APP_ID);
   check("Group options", group.options, [GROUP_OPTION_NAME]);
 
   const plans = group.sellingPlans.nodes;
@@ -286,6 +316,56 @@ async function run(
     throw new SyncRefused(errors.map((error) => error.message).join("; "));
   }
   return data[key];
+}
+
+/**
+ * Keeps the product from being bought outside a plan, and says when it can't ship.
+ * - A product with plans must require one, or a one-time purchase makes an order with no
+ *   subscription behind it. Set when a plan is attached.
+ * - A product that has lost its last selling plan group goes back to selling normally,
+ *   because one that requires a plan and has none can't be bought at all.
+ * - The subscription item must be shippable so checkout always asks for an address; a variant
+ *   that isn't is reported as a difference, since the app can't fix it without changing stock.
+ */
+async function settleProducts(
+  graphql: Graphql,
+  attached: string[],
+  detached: string[],
+) {
+  const ids = [...attached, ...detached];
+  if (ids.length === 0) return [];
+  type State = {
+    id: string;
+    requiresSellingPlan: boolean;
+    sellingPlanGroupsCount: { count: number };
+    variants: { nodes: { inventoryItem: { requiresShipping: boolean } }[] };
+  };
+  const { nodes } = (await graphql(PRODUCT_STATE, { ids })) as {
+    nodes: (State | null)[];
+  };
+  const differences: string[] = [];
+  for (const product of nodes) {
+    if (!product) continue;
+    const isAttached = attached.includes(product.id);
+    const wantRequired = isAttached || product.sellingPlanGroupsCount.count > 0;
+    if (product.requiresSellingPlan !== wantRequired) {
+      await run(
+        graphql,
+        SET_REQUIRES_PLAN,
+        { product: { id: product.id, requiresSellingPlan: wantRequired } },
+        "productUpdate",
+      );
+    }
+    const unshippable = product.variants.nodes.filter(
+      (variant) => !variant.inventoryItem.requiresShipping,
+    ).length;
+    if (isAttached && unshippable > 0) {
+      differences.push(
+        `${unshippable} variant(s) of the product aren't marked as physical products, so checkout wouldn't ask for a shipping address. Turn on "This is a physical product" for them in Shopify`,
+      );
+    }
+  }
+  return differences;
 }
 
 async function findGroup(graphql: Graphql, plan: SyncablePlan) {
@@ -436,9 +516,10 @@ export async function syncPlan(
       },
     });
 
+    let extra: string[] = [];
     if (existing) {
       const attached = existing.products.nodes.map((node) => node.id);
-      const extra = attached.filter((id) => !wanted.includes(id));
+      extra = attached.filter((id) => !wanted.includes(id));
       const missing = wanted.filter((id) => !attached.includes(id));
       if (extra.length > 0) {
         await run(
@@ -458,11 +539,14 @@ export async function syncPlan(
       }
     }
 
+    const productIssues = await settleProducts(graphql, wanted, extra);
+
     const back = await graphql(FIND_GROUP, { id: groupId });
     const group = back.sellingPlanGroup as ShopifyGroup | null;
     const differences = group
       ? describeDifferences(subject, group, back.shop.currencyCode)
       : ["Shopify doesn't return the group after it was written"];
+    differences.push(...productIssues);
 
     if (differences.length === 0) {
       await finish({

@@ -7,6 +7,7 @@ import {
   describeDifferences,
   groupCreateInput,
   groupUpdateInput,
+  SELLING_PLAN_APP_ID,
   SyncBusy,
   syncPlan,
   type Graphql,
@@ -66,6 +67,16 @@ let next = 0; // across fakes, so IDs stay unique in the shared test database
 /** An in-memory Shopify: the selling plan group operations the sync uses. */
 function fakeShopify() {
   const groups = new Map<string, ShopifyGroup>();
+  /** Products the sync has touched: whether they require a plan, and how many variants don't ship. */
+  const products = new Map<
+    string,
+    { requiresSellingPlan: boolean; unshippable: number }
+  >();
+  const productOf = (id: string) => {
+    if (!products.has(id))
+      products.set(id, { requiresSellingPlan: false, unshippable: 0 });
+    return products.get(id)!;
+  };
   const calls: string[] = [];
   const hooks: {
     ignoreUpdates?: boolean;
@@ -131,6 +142,7 @@ function fakeShopify() {
           const group: ShopifyGroup = {
             id,
             name: v.input.name,
+            appId: v.input.appId,
             merchantCode: v.input.merchantCode,
             options: v.input.options,
             sellingPlans: {
@@ -160,6 +172,7 @@ function fakeShopify() {
           if (!hooks.ignoreUpdates) {
             const group = groups.get(v.id)!;
             group.name = v.input.name;
+            group.appId = v.input.appId;
             for (const fields of v.input.sellingPlansToUpdate) {
               const target = group.sellingPlans.nodes.find(
                 (p) => p.id === fields.id,
@@ -183,6 +196,33 @@ function fakeShopify() {
           );
           return { sellingPlanGroupRemoveProducts: { userErrors: [] } };
         }
+        case "PlanProducts": {
+          const attachedTo = (id: string) =>
+            [...groups.values()].filter((g) =>
+              g.products.nodes.some((p) => p.id === id),
+            ).length;
+          return {
+            nodes: v.ids.map((id: string) => {
+              const state = productOf(id);
+              return {
+                id,
+                requiresSellingPlan: state.requiresSellingPlan,
+                sellingPlanGroupsCount: { count: attachedTo(id) },
+                variants: {
+                  nodes: [...Array(state.unshippable).fill(false), true].map(
+                    (requiresShipping) => ({
+                      inventoryItem: { requiresShipping },
+                    }),
+                  ),
+                },
+              };
+            }),
+          };
+        }
+        case "PlanProductRequires":
+          productOf(v.product.id).requiresSellingPlan =
+            v.product.requiresSellingPlan;
+          return { productUpdate: { userErrors: [] } };
       }
       throw new Error(`unexpected ${operation}`);
     })();
@@ -192,6 +232,7 @@ function fakeShopify() {
   return {
     graphql,
     groups,
+    products,
     calls,
     hooks,
     count: (op: string) => calls.filter((c) => c === op).length,
@@ -217,6 +258,7 @@ describe("the selling plan payload", () => {
     const create = groupCreateInput(base);
     expect(create).toEqual({
       name: "Yearly subscription",
+      appId: SELLING_PLAN_APP_ID,
       merchantCode: "plan1",
       options: ["Subscription"],
       sellingPlansToCreate: [
@@ -301,10 +343,12 @@ describe("syncPlan", () => {
       syncLeaseUntil: null,
     });
     expect(group.products.nodes).toEqual([{ id: "gid://shopify/Product/1" }]);
-    // find, create, then read back
+    // find, create, settle the product, then read back
     expect(shopify.calls).toEqual([
       "PlanGroupByCode",
       "PlanGroupCreate",
+      "PlanProducts",
+      "PlanProductRequires",
       "PlanGroupById",
     ]);
   });
@@ -565,6 +609,95 @@ describe("syncPlan", () => {
     expect(await syncPlan(db(), shopify.graphql, other.id, id)).toBeNull();
     expect(shopify.calls).toEqual([]);
     expect((await row(id)).syncStatus).toBe("NOT_SYNCED");
+  });
+});
+
+describe("the product a plan is attached to", () => {
+  const product = "gid://shopify/Product/1";
+
+  it("requires a plan, so it can't be bought one time, and tags groups with the app ID", async () => {
+    const { shop, id } = await newPlan();
+    const shopify = fakeShopify();
+    await syncPlan(db(), shopify.graphql, shop.id, id);
+    expect(shopify.products.get(product)?.requiresSellingPlan).toBe(true);
+    expect([...shopify.groups.values()][0].appId).toBe(SELLING_PLAN_APP_ID);
+  });
+
+  it("puts the app ID on a group made before it existed", async () => {
+    const { shop, id } = await newPlan();
+    const shopify = fakeShopify();
+    await syncPlan(db(), shopify.graphql, shop.id, id);
+    const [group] = [...shopify.groups.values()];
+    group.appId = null;
+    const result = await syncPlan(db(), shopify.graphql, shop.id, id);
+    expect(group.appId).toBe(SELLING_PLAN_APP_ID);
+    expect(result?.status).toBe("SYNCED");
+  });
+
+  it("goes back to selling normally when its last plan is turned off", async () => {
+    const { shop, id } = await newPlan();
+    const shopify = fakeShopify();
+    await syncPlan(db(), shopify.graphql, shop.id, id);
+    await setPlanActive(db(), shop.id, id, false);
+    await syncPlan(db(), shopify.graphql, shop.id, id);
+    expect(shopify.products.get(product)?.requiresSellingPlan).toBe(false);
+    await setPlanActive(db(), shop.id, id, true);
+    await syncPlan(db(), shopify.graphql, shop.id, id);
+    expect(shopify.products.get(product)?.requiresSellingPlan).toBe(true);
+  });
+
+  it("keeps requiring a plan while another plan is still on it", async () => {
+    const shop = await newShop();
+    const make = async () =>
+      (await createPlan(db(), shop.id, `key-${++n}-aaaaaa`, input())).id;
+    const [a, b] = [await make(), await make()];
+    const shopify = fakeShopify();
+    await syncPlan(db(), shopify.graphql, shop.id, a);
+    await syncPlan(db(), shopify.graphql, shop.id, b);
+    await setPlanActive(db(), shop.id, a, false);
+    await syncPlan(db(), shopify.graphql, shop.id, a);
+    expect(shopify.products.get(product)?.requiresSellingPlan).toBe(true);
+    await setPlanActive(db(), shop.id, b, false);
+    await syncPlan(db(), shopify.graphql, shop.id, b);
+    expect(shopify.products.get(product)?.requiresSellingPlan).toBe(false);
+  });
+
+  it("releases the old product and requires a plan on the new one when the plan moves", async () => {
+    const { shop, id } = await newPlan();
+    const shopify = fakeShopify();
+    await syncPlan(db(), shopify.graphql, shop.id, id);
+    await updatePlan(db(), shop.id, id, {
+      ...input(),
+      productGid: "gid://shopify/Product/2",
+    });
+    await syncPlan(db(), shopify.graphql, shop.id, id);
+    expect(shopify.products.get(product)?.requiresSellingPlan).toBe(false);
+    expect(
+      shopify.products.get("gid://shopify/Product/2")?.requiresSellingPlan,
+    ).toBe(true);
+  });
+
+  it("reports a variant that doesn't ship, because checkout wouldn't ask for an address", async () => {
+    const { shop, id } = await newPlan();
+    const shopify = fakeShopify();
+    shopify.products.set(product, {
+      requiresSellingPlan: false,
+      unshippable: 2,
+    });
+    const result = await syncPlan(db(), shopify.graphql, shop.id, id);
+    expect(result?.status).toBe("MISMATCH");
+    expect(result?.message).toMatch(/2 variant\(s\).*shipping address/);
+    expect((await row(id)).syncStatus).toBe("MISMATCH");
+  });
+
+  it("doesn't call shipping on a product the plan has left", async () => {
+    const { shop, id } = await newPlan();
+    const shopify = fakeShopify();
+    await syncPlan(db(), shopify.graphql, shop.id, id);
+    shopify.products.get(product)!.unshippable = 1;
+    await setPlanActive(db(), shop.id, id, false);
+    const result = await syncPlan(db(), shopify.graphql, shop.id, id);
+    expect(result?.status).toBe("SYNCED");
   });
 });
 
