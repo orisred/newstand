@@ -1,0 +1,11 @@
+query CartValidationsGenerateRunInput {
+  cart {
+    lines {
+      sellingPlanAllocation {
+        sellingPlan {
+          id
+        }
+      }
+    }
+  }
+}

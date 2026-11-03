@@ -14,7 +14,7 @@
     // Keep in step with application_url in shopify.app.toml.
     "SHOPIFY_APP_URL": "https://release-subscriptions.ne-dev.workers.dev",
     // Keep in step with access_scopes.scopes in shopify.app.toml.
-    "SCOPES": "write_products,read_customers,write_customers,read_customer_payment_methods,write_own_subscription_contracts,write_orders,write_merchant_managed_fulfillment_orders",
+    "SCOPES": "write_products,read_customers,write_customers,read_customer_payment_methods,write_own_subscription_contracts,write_orders,write_merchant_managed_fulfillment_orders,write_validations",
     "SHOP_CUSTOM_DOMAIN": ""
   },
   // Set with `wrangler secret put` for production and in .dev.vars locally:

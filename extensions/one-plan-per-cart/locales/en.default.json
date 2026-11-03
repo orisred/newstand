@@ -1,0 +1,4 @@
+{
+  "name": "One subscription plan per checkout",
+  "description": "Stops a checkout that holds two different subscription plans."
+}
