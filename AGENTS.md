@@ -1,0 +1,32 @@
+# Agent instructions
+
+Read `docs/PLAN.md` and `docs/DECISIONS.md` before changing behavior. Decisions there are settled; do not re-open them in code without a note in `DECISIONS.md`.
+
+## Core model
+
+- A **Release** is one issue, drop or box. Dates are optional: by default the merchant moves it through unannounced → pre-order → ready to ship by hand. Never assume a release has dates.
+- A **Plan** sells a number of releases and is synced to a Shopify selling plan.
+- A **Subscription** links one Shopify subscription contract to a plan and counts `releasesRemaining`.
+- A **Delivery** is one subscription receiving one release, backed by one Shopify order.
+- A Plan is `PER_RELEASE` (charged at the plan's `perReleaseChargeAt` step, default when the pre-order opens) or `PREPAID_BUNDLE` (a number of releases paid upfront, shown under a merchant-chosen `displayName`).
+- Bundle renewal follows the plan's `renewalRule`. The default `TERM_DATE_HOLD_IF_LATE` renews at `termEndsAt`, but if the last paid release's order hasn't been created yet, it waits until that order exists.
+
+## Rules
+
+- Never rely on Shopify's delivery schedule for release orders. The worker creates each release's $0 order itself when the shop's `orderTiming` step happens, using the address on the contract at that moment.
+- Money moves only through Shopify billing attempts (`subscriptionBillingAttemptCreate`). Never charge cards any other way.
+- Every billing attempt must be idempotent: use an idempotency key of `subscriptionId:releaseId:attempt`.
+- Runtime is Cloudflare Workers, not Node. Do not use Node-only APIs (`fs`, `net`, Node streams); use Web APIs.
+- Background work: the Worker's `scheduled` handler (hourly Cron Trigger) finds due work and enqueues it on Cloudflare Queues; the `queue` handler does it. Merchant actions (announce pre-order, ready to ship) enqueue directly. Never do long work inside a request.
+- D1 has no interactive transactions. Make every write idempotent with unique keys and use `batch` for multi-row writes.
+- Keep admin page loads to a few small D1 queries; D1 is single-region and Built for Shopify checks admin load speed.
+- UI: Polaris web components and App Bridge only, so the admin feels native.
+- Use the merchant's release word ("issue", "drop", "box") in all customer-facing text; never hard-code "issue".
+- Customer-facing copy and emails must be switchable off per merchant.
+- The mandatory GDPR webhooks (`customers/data_request`, `customers/redact`, `shop/redact`) must stay working.
+
+## Checks
+
+Run the type check, lint and tests before every commit. Add a test for every billing, renewal or cutoff rule you touch.
+
+- Cake Zine's behavior is the default, not the only mode. Every merchant-facing rule (start rule, order timing, renewal rule, triggers) is a setting.
