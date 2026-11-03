@@ -1,0 +1,39 @@
+# Build steps by agent model
+
+Each step is one T3 Code thread. Start a fresh thread per step, point it at this file, `AGENTS.md` and `docs/PLAN.md`, and give it only that step. Don't start a step until the one before it passes its check on the dev store.
+
+## How models are assigned
+
+| Model (Claude Code provider) | Use it for | Effort |
+| --- | --- | --- |
+| **Opus 5.5** | Work where a mistake costs money or data: billing, renewals, migration, the Workers port, security and App Store review | High |
+| **Sonnet 5.5** | Most feature work: admin screens, webhooks, extensions, emails | Medium |
+| **Haiku 5.5** | Mechanical work: scaffolding commands, CSV export, copy, docs, lint and type fixes | Low |
+
+Rule of thumb: if a step touches `subscriptionBillingAttemptCreate`, creates orders, or rewrites existing subscriber data, it runs on Opus. Any step can end with a second-opinion review on a different provider (for example Codex) before merging.
+
+## Steps
+
+| # | Step | Model | Effort | Done when |
+| --- | --- | --- | --- | --- |
+| 1 | Scaffold Shopify's React Router template into the repo, keep `docs/` and `AGENTS.md`, create the dev store and app in the Partner Dashboard | Haiku 5.5 | Low | `shopify app dev` opens the template's home page in the dev store |
+| 2 | Port to Cloudflare Workers: `@cloudflare/vite-plugin`, `wrangler.jsonc` (D1, KV, Queue, Cron bindings), Web-stream rendering, KV session storage, Prisma D1 adapter, first D1 migration from `prisma/schema.draft.prisma` | Opus 5.5 | High | App installs and loads in the dev store from `wrangler dev`, and again after `wrangler deploy` |
+| 3 | Job plumbing: `scheduled` handler (hourly tick finds due work), `queue` consumer, idempotency helpers, structured logging | Opus 5.5 | High | A test job enqueued from the tick runs exactly once even when delivered twice |
+| 4 | Shop settings and release screens: release word, countries, order timing, email toggles; releases list with Announce pre-order and Ready to ship buttons (Polaris web components) | Sonnet 5.5 | Medium | A merchant can create a release and move it through every status in the admin |
+| 5 | Plans and selling plan sync: per-release and prepaid bundle plans, display name, term length, renewal rule, start rule, giftable; sync to Shopify selling plan groups | Sonnet 5.5 | Medium | Plans appear on a product in the dev store and match the app's records |
+| 6 | Theme app extension: plan picker on the product page | Sonnet 5.5 | Medium | A test customer can choose a plan and check out |
+| 7 | Subscriptions in: contract webhooks create a Subscription, apply the start rule (pre-order switchover), and create an immediate order when the first issue is already released | Opus 5.5 | High | Sign-ups before and after a pre-order announcement get the right first issue |
+| 8 | Release runs: on Ready to ship (or pre-order, per shop setting) create one $0 order per subscriber, set Delivery rows, export the run as CSV | Opus 5.5 | High | A run on 20 test subscribers creates 20 orders once, even if the action is pressed twice |
+| 9 | Renewals and per-release charges: term-date renewal with late-release hold, per-release charging, retries then pause, held deliveries shipping late once paid, price-change policy | Opus 5.5 | High | Tests cover the late-issue hold, the extra-issue-before-renewal case, a failed card and a recovery |
+| 10 | Emails and Flow: welcome, pre-order announced (confirm address CTA, tracked), upcoming charge, failed payment, last issue; per-shop toggles; Flow triggers; member discount tag | Sonnet 5.5 | Medium | Each email renders with the shop's release word and can be switched off |
+| 11 | Customer portal (customer account UI extension): upcoming issues, confirm or change address, update card, cancel | Sonnet 5.5 | Medium | A test customer can confirm an address from the email link and see it recorded |
+| 12 | Gifts: gift checkout, recipient details and message, no auto-renew, end-of-gift offer, gift to an existing subscriber starts a second subscription | Sonnet 5.5 | Medium | A gift purchase creates a recipient subscription and never charges the buyer again |
+| 13 | Merchant dashboard: subscriber list and detail, address confirmation status per release, revenue per release, churn | Sonnet 5.5 | Medium | Admin pages load in under 1 second on the dev store |
+| 14 | Migration import: rebuild Conjured subscribers from Shopify order history plus the contacts export, dry-run report, create contracts on saved cards | Opus 5.5 | High | Dry run on the dev store matches a hand-checked sample of 20 subscribers |
+| 15 | Hardening review: GDPR webhooks, scopes, idempotency, D1 query count per page, error handling | Opus 5.5 | High | Review findings fixed; GDPR webhooks tested |
+| 16 | Cutover runbook for Cake Zine: switch off Conjured renewals, run import, verify, monitor first renewals | Opus 5.5 | High | Runbook reviewed by N before the next issue's pre-order |
+| 17 | Public listing: Billing API plans, onboarding flow, listing copy and screenshots | Sonnet 5.5 (copy: Haiku 5.5) | Medium | Listing submitted for App Store review |
+
+## Small tasks between steps
+
+Typos, lint, type errors, renaming, README or docs updates: Haiku 5.5, low effort.
