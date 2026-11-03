@@ -1,2 +1,7 @@
 /// <reference types="vite/client" />
-/// <reference types="@react-router/node" />
+
+declare module "virtual:react-router/server-build" {
+  import type { ServerBuild } from "react-router";
+  const build: ServerBuild;
+  export = build;
+}

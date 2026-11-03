@@ -56,7 +56,7 @@ Deferred: bundles, swaps, add-ons with a release, print-run caps, gated digital 
 | PriceChange | A plan price increase | newPrice, policy, noticeSentAt |
 | Event | Audit log and Flow trigger source | type, payload, sentToFlowAt |
 
-Draft Prisma models are in `prisma/schema.draft.prisma`.
+Prisma models are in `prisma/schema.prisma`.
 
 ## Edge cases
 

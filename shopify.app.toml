@@ -2,7 +2,7 @@
 
 client_id = "7f0c96d4f07d154d0a5cbedaed311900"
 name = "Release Subscriptions"
-application_url = "https://example.com"
+application_url = "https://release-subscriptions.ne-dev.workers.dev"
 embedded = true
 
 [webhooks]

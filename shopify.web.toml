@@ -3,5 +3,6 @@ roles = ["frontend", "backend"]
 webhooks_path = "/webhooks/app/uninstalled"
 
 [commands]
-predev = "npm exec prisma generate"
-dev = "npm exec prisma migrate deploy && npm exec react-router dev"
+predev = "npx prisma generate"
+# dev:worker passes the CLI's tunnel URL and app credentials to the local Worker.
+dev = "npx wrangler d1 migrations apply DB --local && npm run dev:worker"

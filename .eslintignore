@@ -3,3 +3,5 @@ build
 public/build
 */*.yml
 .shopify
+worker-configuration.d.ts
+app/generated

@@ -74,6 +74,13 @@ module.exports = {
         "plugin:import/recommended",
         "plugin:import/typescript",
       ],
+      rules: {
+        // Provided by workerd and Vite at build time, not by node_modules.
+        "import/no-unresolved": [
+          "error",
+          { ignore: ["^cloudflare:", "^virtual:"] },
+        ],
+      },
     },
 
     // Node
@@ -81,6 +88,7 @@ module.exports = {
       files: [
         ".eslintrc.cjs",
         "vite.config.{js,ts}",
+        "vitest.config.{js,ts}",
         ".graphqlrc.{js,ts}",
         "shopify.server.{js,ts}",
         "**/*.server.{js,ts}",
