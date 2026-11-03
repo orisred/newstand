@@ -1,3 +1,4 @@
+import { COUNTRY_CODES } from "./countries";
 import type { createDb } from "./db.server";
 
 type Db = ReturnType<typeof createDb>;
@@ -102,11 +103,11 @@ export function parseSettings(
         .map((code) => code.toUpperCase()),
     ),
   ];
-  const badCountry = countries.find((code) => !/^[A-Z]{2}$/.test(code));
+  const badCountry = countries.find((code) => !COUNTRY_CODES.has(code));
   if (countries.length === 0) {
     errors.allowedCountries = "Enter at least one country code, such as US.";
   } else if (badCountry) {
-    errors.allowedCountries = `${badCountry} is not a two-letter country code.`;
+    errors.allowedCountries = `${badCountry.slice(0, 10)} is not a country code we recognize, such as US.`;
   }
 
   const orderTiming = form.get("orderTiming");

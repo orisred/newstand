@@ -96,6 +96,14 @@ model Plan {
   name             String
   displayName      String         // shown to customers, e.g. "Yearly subscription"
   sellingPlanGid   String?        @unique
+  sellingPlanGroupGid String?     @unique // one group per plan, holding this plan's one selling plan
+  productGid       String?        // the product the plan is sold on; null until chosen
+  productTitle     String?        // as picked, so pages need no Admin API call
+  syncStatus       PlanSyncStatus @default(NOT_SYNCED)
+  syncMessage      String?        // why it's ERROR or MISMATCH, in words for the merchant
+  syncedAt         DateTime?
+  syncRevision     Int            @default(0) // bumped by each change or retry; part of the sync job's ID
+  syncLeaseUntil   DateTime?      // set while a sync runs, so two never run at once
   billingMode      BillingMode    @default(PREPAID_BUNDLE)
   releasesPerTerm  Int            @default(1)
   termMonths       Int?           // e.g. 12 for a yearly bundle; null for per-release
@@ -110,6 +118,16 @@ model Plan {
   updatedAt        DateTime       @updatedAt
   subscriptions    Subscription[]
   priceChanges     PriceChange[]
+
+  @@index([shopId, createdAt])
+}
+
+enum PlanSyncStatus {
+  NOT_SYNCED // new, or changed since the last sync
+  SYNCING
+  SYNCED     // Shopify was read back and matches
+  MISMATCH   // read back and differs from this record
+  ERROR      // Shopify refused or didn't answer
 }
 
 enum SubscriptionStatus {

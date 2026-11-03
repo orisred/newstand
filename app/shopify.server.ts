@@ -7,6 +7,11 @@ import {
 } from "@shopify/shopify-app-react-router/server";
 import { D1SessionStorage } from "./session-storage.server";
 
+const sessionStorage = new D1SessionStorage(env.DB, {
+  apiKey: env.SHOPIFY_API_KEY,
+  apiSecretKey: env.SHOPIFY_API_SECRET,
+});
+
 const shopify = shopifyApp({
   apiKey: env.SHOPIFY_API_KEY,
   apiSecretKey: env.SHOPIFY_API_SECRET,
@@ -14,10 +19,7 @@ const shopify = shopifyApp({
   scopes: env.SCOPES.split(","),
   appUrl: env.SHOPIFY_APP_URL,
   authPathPrefix: "/auth",
-  sessionStorage: new D1SessionStorage(env.DB, {
-    apiKey: env.SHOPIFY_API_KEY,
-    apiSecretKey: env.SHOPIFY_API_SECRET,
-  }),
+  sessionStorage,
   distribution: AppDistribution.AppStore,
   future: {
     expiringOfflineAccessTokens: true,
@@ -34,4 +36,4 @@ export const authenticate = shopify.authenticate;
 export const unauthenticated = shopify.unauthenticated;
 export const login = shopify.login;
 export const registerWebhooks = shopify.registerWebhooks;
-export const sessionStorage = shopify.sessionStorage;
+export { sessionStorage };
