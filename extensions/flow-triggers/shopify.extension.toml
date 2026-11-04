@@ -1,0 +1,76 @@
+# Shopify Flow triggers. The app sends them with flowTriggerReceive (app/flow.server.ts), and the
+# handles and field keys below must match what `triggerFor` builds. Flow reads the customer itself
+# from customer_id, so nothing personal is sent. Shopify allows only letters and spaces in a field's
+# key, and the payload uses the key as written.
+
+[[extensions]]
+type = "flow_trigger"
+name = "Subscription started"
+handle = "subscription-started"
+uid = "6e4dc52c-5156-ba55-a5b6-116277783041e1cb47b9"
+description = "A customer started a subscription."
+
+  [extensions.settings]
+    [[extensions.settings.fields]]
+    type = "customer_reference"
+
+    [[extensions.settings.fields]]
+    type = "single_line_text_field"
+    key = "Plan"
+
+[[extensions]]
+type = "flow_trigger"
+name = "Subscription payment failed"
+handle = "subscription-payment-failed"
+uid = "0221ba80-194d-7eae-161a-56ac3870b7982a698d69"
+description = "A subscription's charge failed. Will retry is false when this was the last try and the subscription paused."
+
+  [extensions.settings]
+    [[extensions.settings.fields]]
+    type = "customer_reference"
+
+    [[extensions.settings.fields]]
+    type = "single_line_text_field"
+    key = "Plan"
+
+    [[extensions.settings.fields]]
+    type = "boolean"
+    key = "Will retry"
+
+[[extensions]]
+type = "flow_trigger"
+name = "Subscription paused or cancelled"
+handle = "subscription-paused-or-cancelled"
+uid = "71b5f968-556c-1d1a-9bc6-0f00d2e66cf003f1aa79"
+description = "A subscription paused (failed payment or chargeback) or was cancelled."
+
+  [extensions.settings]
+    [[extensions.settings.fields]]
+    type = "customer_reference"
+
+    [[extensions.settings.fields]]
+    type = "single_line_text_field"
+    key = "Plan"
+
+    [[extensions.settings.fields]]
+    type = "single_line_text_field"
+    key = "Status"
+
+    [[extensions.settings.fields]]
+    type = "single_line_text_field"
+    key = "Reason"
+
+[[extensions]]
+type = "flow_trigger"
+name = "Last release shipped"
+handle = "last-release-shipped"
+uid = "e6831b5e-3820-341f-a84d-2a6da90e69627c2f52c0"
+description = "The last release a subscriber has paid for started shipping and nothing renews after it."
+
+  [extensions.settings]
+    [[extensions.settings.fields]]
+    type = "customer_reference"
+
+    [[extensions.settings.fields]]
+    type = "single_line_text_field"
+    key = "Plan"

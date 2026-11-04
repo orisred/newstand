@@ -52,16 +52,16 @@ const PAID_LEFT = `s."releasesRemaining" > (
     SELECT COUNT(*) FROM "Delivery" d
     WHERE d."subscriptionId" = s."id" AND d."status" = 'PENDING'
   )`;
-const CHARGE_DUE = `p."billingMode" = 'PER_RELEASE' AND p."autoRenew" = 1
+export const CHARGE_DUE = `p."billingMode" = 'PER_RELEASE' AND p."autoRenew" = 1
   AND s."status" = 'ACTIVE' AND s."source" <> 'GIFT'
   AND s."paymentProblemSince" IS NULL AND s."releasesRemaining" = 0
   AND NOT EXISTS (
     SELECT 1 FROM "Delivery" d
     WHERE d."subscriptionId" = s."id" AND d."status" = 'PENDING'
   )`;
-const CHARGEBACK_HOLD = `COALESCE(s."pausedReason", '') = 'CHARGEBACK'`;
+export const CHARGEBACK_HOLD = `COALESCE(s."pausedReason", '') = 'CHARGEBACK'`;
 const SHIPPABLE = `NOT ${CHARGEBACK_HOLD} AND ((${PAID_LEFT}) OR (${CHARGE_DUE}))`;
-const DUE_SUBSCRIPTION = `s."status" <> 'ENDED'
+export const DUE_SUBSCRIPTION = `s."status" <> 'ENDED'
   AND s."contractGid" IS NOT NULL
   AND s."firstReleaseNumber" <= r."number"
   AND ((${SHIPPABLE})
@@ -82,9 +82,12 @@ export async function createDueDeliveries(
 ) {
   const { meta } = await rawDb
     .prepare(
-      `INSERT INTO "Delivery" ("id", "subscriptionId", "releaseId", "status", "updatedAt")
+      `INSERT INTO "Delivery" ("id", "subscriptionId", "releaseId", "status", "updatedAt", "addressConfirmedAt")
        SELECT lower(hex(randomblob(16))), s."id", r."id",
-         CASE WHEN ${SHIPPABLE} THEN 'PENDING' ELSE 'HELD' END, ?3
+         CASE WHEN ${SHIPPABLE} THEN 'PENDING' ELSE 'HELD' END, ?3,
+         -- A confirmation from the pre-order email, made before this Delivery existed.
+         (SELECT e."addressConfirmedAt" FROM "EmailSend" e
+          WHERE e."id" = 'preorderAnnounced:' || s."id" || ':' || r."id")
        FROM "Release" r
        JOIN "Shop" sh ON sh."id" = r."shopId"
        JOIN "Subscription" s ON s."shopId" = r."shopId"

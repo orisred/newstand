@@ -44,6 +44,8 @@ export async function recordDataRequest(
       billingAttempts: {
         select: { attempt: true, result: true, errorCode: true, orderGid: true, createdAt: true },
       },
+      // What was sent, not what it said: nothing personal is kept.
+      emailSends: { select: { kind: true, status: true, sentAt: true } },
       deliveries: {
         select: {
           orderGid: true,
@@ -99,6 +101,8 @@ export async function redactCustomer(
            OR ("type" = '${DATA_REQUEST_EVENT}' AND json_extract("payload", '$.customerGid') = ?2))`,
       )
       .bind(shop.id, customerGid),
+    rawDb.prepare(`DELETE FROM "EmailSend" WHERE "subscriptionId" IN (${held})`).bind(shop.id, customerGid),
+    rawDb.prepare(`DELETE FROM "MemberTag" WHERE "shopId" = ?1 AND "customerGid" = ?2`).bind(shop.id, customerGid),
     rawDb
       .prepare(
         `UPDATE "Delivery" SET "addressConfirmedAt" = NULL, "orderError" = NULL,
@@ -155,6 +159,8 @@ export async function redactShop(
     statements.push(
       ...[
         `DELETE FROM "Event" WHERE "shopId" = ?1`,
+        `DELETE FROM "EmailSend" WHERE "shopId" = ?1`,
+        `DELETE FROM "MemberTag" WHERE "shopId" = ?1`,
         `DELETE FROM "BillingAttempt" WHERE "subscriptionId" IN ${subscriptions}`,
         `DELETE FROM "Delivery" WHERE "subscriptionId" IN ${subscriptions}`,
         `DELETE FROM "Subscription" WHERE "shopId" = ?1`,

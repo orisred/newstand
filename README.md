@@ -16,7 +16,7 @@ Shopify's selling plan anchors only repeat on a weekday, a day of the month or a
 - Cron Triggers (hourly tick) and Cloudflare Queues for background work
 - Workers Paid plan ($5/month)
 - Theme app extension (plan picker), customer account UI extension (portal) and a cart validation Function (one plan per checkout)
-- Built-in emails, each switchable off in favor of Shopify Flow or Klaviyo
+- Built-in emails through Cloudflare Email Service, each switchable off in favor of Shopify Flow or Klaviyo (the price-rise notice has no switch)
 
 ## Getting started
 
@@ -57,6 +57,15 @@ Logs are JSON with `event`, `jobType`, `jobId` and `shop`. Find failures in the 
 A release's run recovers by itself: the tick starts a new chain of `release.run` slices every hour for each open release at its order step, so don't resend a dead one. Search `release_run.throttled` for Shopify's limit at work, and `release_run.left_for_tick` or `release_run.order_failed` for orders that keep failing. See "Release runs" in `docs/DECISIONS.md`.
 
 Charges recover the same way: the tick finds renewals due, retries due and attempts with no result. Search `billing.failed` for failed charges, `billing.unknown_attempt` for a charge the app didn't make, and `session.refresh_rejected` for a shop whose token has died. See "Renewals and charges" in `docs/DECISIONS.md`.
+
+## Emails, Flow triggers and the member tag
+
+Emails go through Cloudflare Email Service (`send_email` binding `EMAIL`, in `app/email-send.server.ts`), from one address for every shop: `EMAIL_FROM_ADDRESS`, whose domain must be onboarded with `wrangler email sending enable <domain>` and have its DNS on Cloudflare. The From name is the shop's name and the Reply-To its contact email. Copy is in `app/email-templates.ts`. See "Emails, Flow and the member tag" in `docs/DECISIONS.md` for when each goes, what a crash does and what Step 11 must do with the link in them.
+
+- **Dev stores:** set `wrangler secret put EMAIL_RECIPIENT_DOMAINS` (such as `mailinator.com`) and the app mails only those domains and skips the rest, because a dev store's customers have made-up addresses. Delete it for a real store.
+- **Logs to search:** `email.failed` (refused for good), `email.unsure` (a send that may or may not have gone; set its `EmailSend` row back to `PENDING` to send it), `email.waiting` (Cloudflare's rate or daily limit, or a sender problem), `email.retry`, `flow.refused`, `flow.send_failed`, `member_tag.failed`. `EmailSend.status` and `reason` say what became of each email.
+- **Flow triggers** live in `extensions/flow-triggers` and are released with `npm run deploy`. A merchant uses them in Shopify Flow as "Subscription started", "Subscription payment failed", "Subscription paused or cancelled" and "Last release shipped".
+- **Member discount:** the tag is `Shop.memberDiscountTag` (default `active-subscriber`). A merchant sets up the discount in Shopify as an automatic discount limited to a customer segment with that tag.
 
 Then follow `docs/BUILD_STEPS.md`, one agent thread per step.
 

@@ -16,6 +16,17 @@ import {
   settleAttempt,
 } from "../billing.server";
 import { ensureCartRule } from "../cart-rule.server";
+import { runEmailSlice } from "../emails.server";
+import { runFlowSlice } from "../flow.server";
+import { runMemberTagSlice } from "../member-tag.server";
+import {
+  EMAIL_JOB,
+  emailRunJob,
+  FLOW_JOB,
+  flowJob,
+  MEMBER_TAG_JOB,
+  memberTagJob,
+} from "../notification-jobs";
 import {
   GDPR_JOB,
   recordDataRequest,
@@ -54,7 +65,6 @@ async function shopGraphql(shop: string | undefined) {
   return graphqlOf(admin);
 }
 
-// Step 10 adds its job types and finders here.
 export const jobHandlers: Record<string, JobHandler> = {
   // Brings one plan's selling plan group in line with the plan. Queued by the plan screens.
   [SYNC_JOB]: async (job, { db }) => {
@@ -165,6 +175,23 @@ export const jobHandlers: Record<string, JobHandler> = {
     await recordChargeback(db, env.DB, graphql, String(job.data?.orderGid));
   },
 
+  // One slice of a shop's emails: queues what's due, then sends a page. Queued by the tick, by a
+  // merchant's announce and by a new sign-up.
+  [EMAIL_JOB]: async (job, { db, env }) => {
+    const next = await runEmailSlice(env, db, env.DB, () => shopGraphql(job.shop), job);
+    if (next) await enqueueJobs(env, [next.job], next.delaySeconds);
+  },
+
+  [FLOW_JOB]: async (job, { env }) => {
+    const next = await runFlowSlice(env.DB, () => shopGraphql(job.shop), job);
+    if (next) await enqueueJobs(env, [next.job], next.delaySeconds);
+  },
+
+  [MEMBER_TAG_JOB]: async (job, { db, env }) => {
+    const next = await runMemberTagSlice(db, env.DB, () => shopGraphql(job.shop), job);
+    if (next) await enqueueJobs(env, [next]);
+  },
+
   [GDPR_JOB]: async (job, { db, env }) => {
     const { topic, shopDomain, customerGid, requestId } = job.data ?? {};
     if (typeof shopDomain !== "string") throw new Error("gdpr job without a shop");
@@ -194,8 +221,23 @@ const findMissedContractWork: DueWorkFinder = async ({ env, now }) => {
   }));
 };
 
+/** Each hour, for every installed shop: its emails, its Flow triggers and its customers' tags. */
+const findNotificationWork: DueWorkFinder = async ({ env, now }) => {
+  const { results } = await env.DB.prepare(
+    `SELECT s."shopDomain" FROM "Shop" s
+     JOIN "OfflineSession" o ON o."id" = 'offline_' || s."shopDomain"`,
+  ).all<{ shopDomain: string }>();
+  const hour = now.toISOString().slice(0, 13);
+  return results.flatMap(({ shopDomain }) => [
+    emailRunJob(shopDomain, hour),
+    flowJob(shopDomain, hour),
+    memberTagJob(shopDomain, hour),
+  ]);
+};
+
 export const dueWorkFinders: DueWorkFinder[] = [
   findMissedContractWork,
+  findNotificationWork,
   findScheduledSteps,
   findReleaseRuns,
   findRenewals,

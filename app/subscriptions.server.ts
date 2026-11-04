@@ -6,6 +6,12 @@ import type {
 } from "./generated/prisma/enums";
 import type { Job } from "./jobs/runner.server";
 import { logEvent } from "./logger.server";
+import {
+  CANCELLED_EVENT,
+  emailRunJob,
+  memberTagJob,
+  STARTED_EVENT,
+} from "./notification-jobs";
 import type { Graphql } from "./plan-sync.server";
 
 type Db = ReturnType<typeof createDb>;
@@ -28,6 +34,15 @@ export async function markCancelled(
 ) {
   const stamp = now.toISOString();
   await rawDb.batch([
+    // For Flow, once: the ID is the subscription's, and it's only written by the call that closes it.
+    rawDb
+      .prepare(
+        `INSERT INTO "Event" ("id", "shopId", "subscriptionId", "type", "payload")
+         SELECT ?2 || ':' || "id", "shopId", "id", ?2, '{}' FROM "Subscription"
+         WHERE "id" = ?1 AND "status" NOT IN ('CANCELLED', 'ENDED')
+         ON CONFLICT DO NOTHING`,
+      )
+      .bind(subscriptionId, CANCELLED_EVENT),
     rawDb
       .prepare(
         `UPDATE "Delivery" SET "status" = 'CANCELLED', "updatedAt" = ?2
@@ -358,6 +373,14 @@ export async function syncContract(
           Math.round(Number(planLines[0].currentPrice.amount) * 100),
           stamp,
         ),
+      // For Flow. The ID is the contract's, so a lost race or a repeat adds nothing.
+      rawDb
+        .prepare(
+          `INSERT INTO "Event" ("id", "shopId", "subscriptionId", "type", "payload")
+           SELECT ?1, "shopId", "id", ?2, '{}' FROM "Subscription" WHERE "contractGid" = ?3
+           ON CONFLICT DO NOTHING`,
+        )
+        .bind(`${STARTED_EVENT}:${contractGid}`, STARTED_EVENT, contractGid),
       // Only if the insert above won, so a lost race can't add a second first release.
       ...(release
         ? [
@@ -392,6 +415,9 @@ export async function syncContract(
     select: { id: true, release: { select: { status: true } } },
   });
   return [
+    // The welcome email and the member tag needn't wait for the tick. Both read state, so they're repeatable.
+    emailRunJob(shop.shopDomain, `signup:${contractGid}`),
+    memberTagJob(shop.shopDomain, `signup:${contractGid}`),
     ...(contract.originOrder
       ? [paymentOrderJob(shop.shopDomain, contract.originOrder.id)]
       : []),
