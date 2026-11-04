@@ -14,6 +14,8 @@ export const CONTRACT_JOB = "contract.sync";
 export const RECONCILE_JOB = "contracts.reconcile";
 export const DELIVERY_ORDER_JOB = "delivery.order";
 export const PAYMENT_ORDER_JOB = "payment_order.fulfill";
+export const RELEASE_RUN_JOB = "release.run";
+export const RELEASE_FIRE_JOB = "release.fire";
 
 /** Flags a paid contract holding several plans. Becomes `MIXED_HANDLED` when the merchant has dealt with it. */
 export const MIXED_PLANS_EVENT = "contract.mixed_plans";
@@ -29,7 +31,7 @@ type ReleaseStep = {
 
 /**
  * Whether a release's orders are due, under the shop's order timing. A subscriber assigned
- * to a release at this step gets their order straight away. Step 8's run uses it too.
+ * to a release at this step gets their order straight away. The run uses it too.
  */
 export function orderStepReached(status: ReleaseStatus, timing: OrderTiming) {
   if (status === "READY" || status === "SHIPPED") return true;
@@ -156,6 +158,24 @@ export function deliveryOrderJob(shop: string, deliveryId: string, attempt: stri
     id: `${DELIVERY_ORDER_JOB}:${deliveryId}:${attempt}`,
     shop,
     data: { deliveryId },
+  };
+}
+
+/**
+ * One slice of a release's run. `key` makes it a new job, because a run is state-driven: a
+ * slice that died never blocks the next one. `progress` is where the slice before it stopped.
+ */
+export function releaseRunJob(
+  shop: string,
+  releaseId: string,
+  key: string,
+  progress: Record<string, string | number> = {},
+): Job {
+  return {
+    type: RELEASE_RUN_JOB,
+    id: `${RELEASE_RUN_JOB}:${releaseId}:${key}`,
+    shop,
+    data: { ...progress, releaseId },
   };
 }
 

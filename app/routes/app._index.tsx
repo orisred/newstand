@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   ActionFunctionArgs,
   HeadersFunction,
@@ -8,43 +8,74 @@ import {
   useFetcher,
   useLoaderData,
   useNavigate,
+  useRevalidator,
   useSearchParams,
 } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { createDb } from "../db.server";
+import { graphqlOf } from "../plan-sync.server";
 import {
   actionsFor,
   capitalize,
   isReleaseAction,
   type ReleaseAction,
 } from "../release-actions";
+import { formatZoned, zonedFields, zonedToUtc } from "../release-dates";
 import {
   createRelease,
   listReleases,
-  listWaitingOrders,
+  listRunProgress,
+  moveRelease,
   parseQuantity,
   parseTitle,
+  scheduleRelease,
   setReleaseProduct,
-  transitionRelease,
   TITLE_MAX_LENGTH,
 } from "../releases.server";
 import { getOrCreateShop } from "../shop.server";
 import { authenticate } from "../shopify.server";
 import { MIXED_HANDLED_EVENT, MIXED_PLANS_EVENT } from "../subscriptions.server";
 
+const TIMEZONE = `#graphql
+  query ShopTimezone { shop { ianaTimezone } }`;
+
+/** Reads the store's timezone and keeps it, so a page load needs no Admin API call after this. */
+async function refreshTimezone(
+  db: ReturnType<typeof createDb>,
+  admin: Parameters<typeof graphqlOf>[0],
+  shopId: string,
+) {
+  const { shop } = await graphqlOf(admin)(TIMEZONE);
+  const timezone = shop.ianaTimezone as string;
+  await db.shop.update({ where: { id: shopId }, data: { timezone } });
+  return timezone;
+}
+
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const db = createDb(context.cloudflare.env.DB);
   const shop = await getOrCreateShop(db, session.shop);
+  const timezone = shop.timezone ?? (await refreshTimezone(db, admin, shop.id));
   const before = Number(new URL(request.url).searchParams.get("before"));
-  const { releases, nextBefore } = await listReleases(
+  const { releases: rows, nextBefore } = await listReleases(
     db,
     shop.id,
     Number.isInteger(before) && before > 0 ? before : undefined,
   );
-  const [waiting, mixed] = await Promise.all([
-    listWaitingOrders(db, shop.orderTiming, releases),
+  // Dates are text by here, on the store's clock, so the browser never works them out.
+  const releases = rows.map((release) => ({
+    ...release,
+    preorderText:
+      release.preorderOpensAt &&
+      formatZoned(release.preorderOpensAt, timezone),
+    cutoffText: release.cutoffAt && formatZoned(release.cutoffAt, timezone),
+    preorderFields:
+      release.preorderOpensAt && zonedFields(release.preorderOpensAt, timezone),
+    cutoffFields: release.cutoffAt && zonedFields(release.cutoffAt, timezone),
+  }));
+  const [runs, mixed] = await Promise.all([
+    listRunProgress(db, shop.orderTiming, rows),
     db.event.findMany({
       where: { shopId: shop.id, type: MIXED_PLANS_EVENT },
       orderBy: { createdAt: "desc" },
@@ -57,7 +88,8 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     plural: shop.releaseWordPlural,
     releases,
     nextBefore,
-    waiting,
+    runs,
+    timezone,
     mixed: mixed.map(({ id, payload }) => {
       const { orderGid, orderName } = payload as {
         orderGid?: string;
@@ -76,9 +108,10 @@ type ActionData = { ok: boolean; message: string };
 const KEY_PATTERN = /^[A-Za-z0-9-]{8,64}$/;
 
 export const action = async ({ request, context }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const form = await request.formData();
-  const db = createDb(context.cloudflare.env.DB);
+  const { env } = context.cloudflare;
+  const db = createDb(env.DB);
   const shop = await getOrCreateShop(db, session.shop);
   const word = shop.releaseWordSingular;
   const intent = form.get("intent");
@@ -134,10 +167,25 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   }
 
   const releaseId = form.get("releaseId");
+  if (intent === "schedule" && typeof releaseId === "string") {
+    // Read fresh here, so a store that changed timezone saves what the merchant meant.
+    const timezone = await refreshTimezone(db, admin, shop.id);
+    const when = (field: string) => {
+      const date = String(form.get(`${field}Date`) ?? "");
+      return date
+        ? zonedToUtc(date, Number(form.get(`${field}Hour`)), timezone)
+        : null;
+    };
+    return scheduleRelease(db, shop.id, releaseId, word, {
+      mode: form.get("mode") === "SCHEDULED" ? "SCHEDULED" : "MANUAL",
+      preorderOpensAt: when("preorder"),
+      cutoffAt: when("cutoff"),
+    });
+  }
   if (intent === "setProduct" && typeof releaseId === "string") {
     const saved = await setReleaseProduct(
       db,
-      context.cloudflare.env,
+      env,
       { ...shop, shopDomain: session.shop },
       releaseId,
       String(form.get("productGid")),
@@ -153,7 +201,13 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   if (!isReleaseAction(intent) || typeof releaseId !== "string") {
     return { ok: false, message: "Unknown action." } satisfies ActionData;
   }
-  return transitionRelease(db, shop.id, releaseId, intent, word);
+  return moveRelease(
+    db,
+    env,
+    { ...shop, shopDomain: session.shop },
+    releaseId,
+    intent,
+  );
 };
 
 const BUTTON_LABEL: Record<ReleaseAction, string> = {
@@ -179,13 +233,47 @@ const STATUS_TEXT = {
   CANCELLED: "Cancelled",
 } as const;
 
-const day = (date: Date | null) =>
-  date ? date.toISOString().slice(0, 10) : null;
+const HOURS = Array.from({ length: 24 }, (_, hour) => hour);
+
+const hourLabel = (hour: number) =>
+  `${hour % 12 || 12}:00 ${hour < 12 ? "AM" : "PM"}`;
+
+function DateAndHour({
+  label,
+  name,
+  value,
+}: {
+  label: string;
+  name: string;
+  value: { date: string; hour: number } | null;
+}) {
+  return (
+    <s-stack direction="inline" gap="base">
+      <s-date-field
+        label={label}
+        name={`${name}Date`}
+        defaultValue={value?.date ?? ""}
+      />
+      <s-select
+        label="Time"
+        name={`${name}Hour`}
+        value={String(value?.hour ?? 9)}
+      >
+        {HOURS.map((hour) => (
+          <s-option key={hour} value={String(hour)}>
+            {hourLabel(hour)}
+          </s-option>
+        ))}
+      </s-select>
+    </s-stack>
+  );
+}
 
 export default function Releases() {
-  const { word, plural, releases, nextBefore, createKey, waiting, mixed } =
+  const { word, plural, releases, nextBefore, createKey, runs, timezone, mixed } =
     useLoaderData<typeof loader>();
   const fetcher = useFetcher<ActionData>();
+  const { revalidate } = useRevalidator();
   const shopify = useAppBridge();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -193,8 +281,22 @@ export default function Releases() {
     id: string;
     label: string;
   } | null>(null);
+  const [scheduling, setScheduling] = useState<
+    (typeof releases)[number] | null
+  >(null);
+  const scheduleForm = useRef<HTMLFormElement>(null);
   const busy = fetcher.state !== "idle";
   const heading = capitalize(plural);
+  // A run can take a while, so its progress moves on the screen while there's something to see.
+  const running = releases.some(
+    (release) => release.productGid && runs[release.id]?.waiting > 0,
+  );
+
+  useEffect(() => {
+    if (!running) return;
+    const timer = setInterval(revalidate, 30_000);
+    return () => clearInterval(timer);
+  }, [running, revalidate]);
 
   useEffect(() => {
     if (fetcher.data) {
@@ -202,8 +304,28 @@ export default function Releases() {
     }
   }, [fetcher.data, shopify]);
 
+  // A run assigns its subscribers a moment after the press, and then there's progress to show.
+  useEffect(() => {
+    if (!fetcher.data?.ok) return;
+    const timer = setTimeout(revalidate, 5000);
+    return () => clearTimeout(timer);
+  }, [fetcher.data, revalidate]);
+
   const act = (intent: ReleaseAction, releaseId: string) =>
     fetcher.submit({ intent, releaseId }, { method: "POST" });
+
+  const exportRun = async ({ id, number }: { id: string; number: number }) => {
+    const response = await fetch(`/app/releases/${encodeURIComponent(id)}/export`);
+    if (!response.ok) {
+      shopify.toast.show("The export didn't work. Try again.", { isError: true });
+      return;
+    }
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(await response.blob());
+    link.download = `${word}-${number}-orders.csv`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  };
 
   const pickProduct = async (releaseId: string) => {
     // The product picker, because the variant picker shows a one-variant product with no name.
@@ -328,14 +450,21 @@ export default function Releases() {
                       <s-badge tone={BADGE_TONE[release.status]}>
                         {STATUS_TEXT[release.status]}
                       </s-badge>
-                      {day(release.preorderOpensAt) && (
+                      {release.preorderText && (
                         <s-text color="subdued">
-                          Announced {day(release.preorderOpensAt)}
+                          {release.status === "UNANNOUNCED"
+                            ? "Pre-order opens"
+                            : "Announced"}{" "}
+                          {release.preorderText}
                         </s-text>
                       )}
-                      {day(release.cutoffAt) && (
+                      {release.cutoffText && (
                         <s-text color="subdued">
-                          Ready {day(release.cutoffAt)}
+                          {release.status === "UNANNOUNCED" ||
+                          release.status === "PREORDER"
+                            ? "Ready to ship on"
+                            : "Ready"}{" "}
+                          {release.cutoffText}
                         </s-text>
                       )}
                     </s-stack>
@@ -348,13 +477,32 @@ export default function Releases() {
                       ) : (
                         <s-badge tone="warning">No product chosen</s-badge>
                       )}
-                      {waiting[release.id] && (
+                      {runs[release.id] && (
+                        <s-text color="subdued">
+                          {runs[release.id].ordered} of{" "}
+                          {runs[release.id].ordered +
+                            runs[release.id].waiting +
+                            runs[release.id].refused}{" "}
+                          orders created.
+                        </s-text>
+                      )}
+                      {runs[release.id]?.waiting > 0 && !release.productGid && (
                         <s-text tone="critical">
-                          {waiting[release.id].count} waiting for an order.{" "}
-                          {waiting[release.id].error ??
-                            (release.productGid
-                              ? "Being created."
-                              : `Choose a product to ship this ${word}.`)}
+                          {runs[release.id].waiting} waiting for an order. Choose
+                          a product to ship this {word}.
+                        </s-text>
+                      )}
+                      {runs[release.id]?.waiting > 0 && release.productGid && (
+                        <s-text color="subdued">
+                          {runs[release.id].waiting} being created. Shopify limits
+                          how fast this goes, and it carries on by itself.
+                        </s-text>
+                      )}
+                      {runs[release.id]?.refused > 0 && (
+                        <s-text tone="critical">
+                          {runs[release.id].refused} refused:{" "}
+                          {runs[release.id].error} Choose the product again to
+                          retry.
                         </s-text>
                       )}
                       <s-stack direction="inline">
@@ -365,12 +513,38 @@ export default function Releases() {
                         >
                           {release.productGid ? "Change" : "Choose product"}
                         </s-button>
+                        {runs[release.id] && (
+                          <s-button
+                            variant="tertiary"
+                            onClick={() => exportRun(release)}
+                          >
+                            Export CSV
+                          </s-button>
+                        )}
                       </s-stack>
                     </s-stack>
                   </s-table-cell>
                   <s-table-cell>
                     <s-stack direction="inline" gap="small">
-                      {actionsFor(release.status).map((name) =>
+                      {(release.status === "UNANNOUNCED" ||
+                        release.status === "PREORDER") && (
+                        <s-button
+                          commandFor="schedule-modal"
+                          command="--show"
+                          onClick={() => setScheduling(release)}
+                        >
+                          {release.triggerMode === "SCHEDULED"
+                            ? "Change dates"
+                            : "Schedule"}
+                        </s-button>
+                      )}
+                      {actionsFor(release.status)
+                        // Orders use up paid releases, so the server refuses this too.
+                        .filter(
+                          (name) =>
+                            name !== "cancel" || !runs[release.id]?.ordered,
+                        )
+                        .map((name) =>
                         name === "cancel" ? (
                           <s-button
                             key={name}
@@ -406,9 +580,65 @@ export default function Releases() {
         )}
       </s-section>
 
+      <s-modal id="schedule-modal" heading={`Schedule this ${word}`}>
+        {/* Keyed on the release, so the fields start from its dates each time. */}
+        <form ref={scheduleForm} key={scheduling?.id}>
+          <s-stack gap="base">
+            <s-paragraph>
+              Times are in the store&apos;s timezone ({timezone}). The app checks
+              once an hour, so each step happens within the hour after its date.
+              You can still press a step&apos;s button early.
+            </s-paragraph>
+            <s-select
+              label="How it moves on"
+              name="mode"
+              value={scheduling?.triggerMode ?? "MANUAL"}
+            >
+              <s-option value="MANUAL">When I press the buttons</s-option>
+              <s-option value="SCHEDULED">On these dates</s-option>
+            </s-select>
+            {scheduling?.status === "UNANNOUNCED" && (
+              <DateAndHour
+                label="Pre-order opens"
+                name="preorder"
+                value={scheduling.preorderFields ?? null}
+              />
+            )}
+            <DateAndHour
+              label="Ready to ship"
+              name="cutoff"
+              value={scheduling?.cutoffFields ?? null}
+            />
+          </s-stack>
+        </form>
+        <s-button
+          slot="primary-action"
+          variant="primary"
+          commandFor="schedule-modal"
+          command="--hide"
+          onClick={() => {
+            if (!scheduling || !scheduleForm.current) return;
+            const form = new FormData(scheduleForm.current);
+            form.set("intent", "schedule");
+            form.set("releaseId", scheduling.id);
+            fetcher.submit(form, { method: "POST" });
+          }}
+        >
+          Save
+        </s-button>
+        <s-button
+          slot="secondary-actions"
+          commandFor="schedule-modal"
+          command="--hide"
+        >
+          Close
+        </s-button>
+      </s-modal>
+
       <s-modal id="cancel-modal" heading={`Cancel this ${word}?`}>
         <s-paragraph>
           {cancelling?.label} will be cancelled and can&apos;t be brought back.
+          Subscribers assigned to it stay paid for the next {word}.
         </s-paragraph>
         <s-button
           slot="primary-action"

@@ -28,6 +28,7 @@ const shopSelect = {
   allowedCountries: true,
   orderTiming: true,
   emailsEnabled: true,
+  timezone: true,
 } as const;
 
 /**

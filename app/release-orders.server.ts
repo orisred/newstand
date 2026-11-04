@@ -32,13 +32,13 @@ const CONTRACT = `#graphql
 
 const FIND_ORDER = `#graphql
   query OrderByMarker($query: String!) {
-    orders(first: 5, query: $query) { nodes { id sourceIdentifier } }
+    orders(first: 5, query: $query) { nodes { id name sourceIdentifier } }
   }`;
 
 const CREATE_ORDER = `#graphql
   mutation ReleaseOrderCreate($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
     orderCreate(order: $order, options: $options) {
-      order { id }
+      order { id name }
       userErrors { message }
     }
   }`;
@@ -49,11 +49,12 @@ export type OrderResult =
   | "already"
   | "not_due"
   | "no_product"
+  | "no_balance" // nothing paid for this order yet: see the guard below
   | "refused"
   | "skipped";
 
 /**
- * Creates the $0 order behind one Delivery. Step 8's run calls this too.
+ * Creates the $0 order behind one Delivery. The sign-up job and the run both call this.
  *
  * Shopify can't dedupe this for us: `orderCreate` accepts `@idempotent` and a unique metafield
  * and makes a second order anyway (checked live, see DECISIONS.md). So, in this order:
@@ -85,10 +86,11 @@ export async function createDeliveryOrder(
           contractGid: true,
           customerGid: true,
           quantity: true,
+          releasesRemaining: true,
           shop: { select: { orderTiming: true } },
         },
       },
-      release: { select: { status: true, productGid: true } },
+      release: { select: { number: true, status: true, productGid: true } },
     },
   });
   if (!delivery) return "skipped";
@@ -111,6 +113,9 @@ export async function createDeliveryOrder(
     where: {
       id: deliveryId,
       orderGid: null,
+      // Cancelling a release cancels its Deliveries, and refuses while a lease is held. So one
+      // of the two always loses, and no order lands on a release that was just cancelled.
+      status: "PENDING",
       OR: [{ orderLeaseUntil: null }, { orderLeaseUntil: { lt: now } }],
     },
     data: { orderLeaseUntil: new Date(now.getTime() + LEASE_MS) },
@@ -123,7 +128,11 @@ export async function createDeliveryOrder(
   });
   // The search is loose, so match exactly.
   const matches = (
-    found.orders.nodes as { id: string; sourceIdentifier: string | null }[]
+    found.orders.nodes as {
+      id: string;
+      name: string;
+      sourceIdentifier: string | null;
+    }[]
   ).filter((order) => order.sourceIdentifier === marker);
   if (matches.length > 1) {
     logEvent("error", "delivery.duplicate_orders", {
@@ -132,9 +141,20 @@ export async function createDeliveryOrder(
     });
   }
   let orderGid = matches[0]?.id as string | undefined;
+  let orderName = matches[0]?.name;
   const recovered = Boolean(orderGid);
 
   if (!orderGid) {
+    // A run only assigns what's paid for (`createDueDeliveries`), so this needs a bug or a hand
+    // edit to fire. An order found above is recorded regardless, because it already exists.
+    if (subscription.releasesRemaining <= 0) {
+      await db.delivery.updateMany({
+        where: { id: deliveryId, orderGid: null },
+        data: { orderLeaseUntil: null },
+      });
+      logEvent("warn", "delivery.no_balance", { deliveryId });
+      return "no_balance";
+    }
     const data = await graphql(CONTRACT, {
       id: subscription.contractGid,
       variant: release.productGid,
@@ -161,7 +181,9 @@ export async function createDeliveryOrder(
         shippingAddress: address,
         financialStatus: "PAID",
         sourceIdentifier: marker,
-        tags: ["release-subscriptions"],
+        // The second tag lets a merchant filter one release's orders in Shopify, and print
+        // labels or export addresses from there: this app doesn't hold them.
+        tags: ["release-subscriptions", `release-${release.number}`],
         lineItems: [
           {
             variantId: release.productGid,
@@ -187,7 +209,7 @@ export async function createDeliveryOrder(
     });
     const errors: { message: string }[] = created.orderCreate.userErrors;
     // A limit, not a refusal, though it arrives the same way and with no error code.
-    if (errors.some(({ message }) => /too many attempts/i.test(message))) {
+    if (errors.some(({ message }) => /too many attempts|rate limit/i.test(message))) {
       await db.delivery.updateMany({
         where: { id: deliveryId, orderGid: null },
         data: { orderLeaseUntil: null },
@@ -202,6 +224,7 @@ export async function createDeliveryOrder(
       );
     }
     orderGid = created.orderCreate.order.id as string;
+    orderName = created.orderCreate.order.name as string;
   }
 
   const stamp = new Date().toISOString();
@@ -210,17 +233,17 @@ export async function createDeliveryOrder(
     rawDb
       .prepare(
         `UPDATE "Subscription" SET "releasesRemaining" = "releasesRemaining" - 1, "updatedAt" = ?3
-         WHERE "id" = ?1
+         WHERE "id" = ?1 AND "releasesRemaining" > 0
            AND EXISTS (SELECT 1 FROM "Delivery" WHERE "id" = ?2 AND "orderGid" IS NULL)`,
       )
       .bind(delivery.subscriptionId, deliveryId, stamp),
     rawDb
       .prepare(
-        `UPDATE "Delivery" SET "orderGid" = ?2, "status" = 'ORDERED', "orderLeaseUntil" = NULL,
-           "orderError" = NULL, "updatedAt" = ?3
+        `UPDATE "Delivery" SET "orderGid" = ?2, "orderName" = ?4, "status" = 'ORDERED',
+           "orderLeaseUntil" = NULL, "orderError" = NULL, "updatedAt" = ?3
          WHERE "id" = ?1 AND "orderGid" IS NULL`,
       )
-      .bind(deliveryId, orderGid, stamp),
+      .bind(deliveryId, orderGid, stamp, orderName ?? null),
   ]);
   logEvent("info", "delivery.ordered", { deliveryId, orderGid, recovered });
   return recovered ? "recovered" : "created";
