@@ -8,6 +8,7 @@ import {
   type ReleaseAction,
   type ReleaseStatus,
 } from "./release-actions";
+import { emailRunJob } from "./notification-jobs";
 import { createDueDeliveries } from "./release-runs.server";
 import { orderStepReached, releaseRunJob } from "./subscriptions.server";
 
@@ -385,6 +386,14 @@ export async function moveRelease(
         releaseId,
         ...describeError(error),
       }),
+    );
+  }
+  if (result.ok && action === "announce") {
+    // Subscribers hear about the pre-order now rather than at the next tick.
+    await enqueueJobs(env, [
+      emailRunJob(shop.shopDomain, `announce:${releaseId}`),
+    ]).catch((error) =>
+      logEvent("error", "email.enqueue_failed", { releaseId, ...describeError(error) }),
     );
   }
   return result;

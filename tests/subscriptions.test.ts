@@ -453,7 +453,8 @@ describe("syncContract", () => {
       const read = withPlan(contract(), sellingPlanGid);
       const jobs = await syncContract(db(), env.DB, shopifyWith(read), shop, read.id);
       return {
-        types: jobs.map((job) => job.type),
+        // The welcome email and the member tag follow every sign-up; they're tested with the emails.
+        types: jobs.map((job) => job.type).filter((type) => !["email.run", "member.tag"].includes(type)),
         row: (await subscriptionFor(read.id))!,
       };
     };
@@ -506,9 +507,8 @@ describe("syncContract", () => {
   it("a contract from no checkout has no payment order to mark", async () => {
     const { shop, sellingPlanGid } = await setup();
     const read = withPlan(contract({ originOrder: null }), sellingPlanGid);
-    expect(
-      await syncContract(db(), env.DB, shopifyWith(read), shop, read.id),
-    ).toEqual([]);
+    const jobs = await syncContract(db(), env.DB, shopifyWith(read), shop, read.id);
+    expect(jobs.map((job) => job.type)).toEqual(["email.run", "member.tag"]);
   });
 });
 

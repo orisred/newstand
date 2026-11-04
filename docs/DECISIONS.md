@@ -157,7 +157,75 @@ Technical choices from Step 9 that Steps 10, 11, 12, 13 and 14 live with. Checke
 
 **Keeping tokens alive:** no separate job. `contracts.reconcile` runs hourly for every shop with a session, and its `unauthenticated.admin` goes through `loadSession`, which refreshes an access token within 5 minutes of expiry. Access tokens last about an hour, so a refresh happens about hourly, and each one starts the 90-day refresh token's clock again (read from D1: `refreshTokenExpires` was about 90 days out). A shop idle for 80 days, or any number of days, is refreshed by the next tick. A dead token (a stopped Worker, say, for over 90 days) logs `session.refresh_rejected` at error level, and every job for the shop fails and goes `DEAD`. Nothing is lost, because all of this is state-driven and job IDs carry the hour: runs, renewals and retries are found again each tick, and the merchant's next page load gets a new token by exchange. The merchant isn't told, though, since the app has no way to reach them until Step 10.
 
-**Events:** `billing.succeeded`, `billing.failed` (`nextRetryAt` null means it paused) and `billing.chargeback`, for Step 10's emails and Flow triggers. A late-renewal notice can find its people from `termEndsAt` passed and a balance above 0. Nothing writes a row for that yet.
+**Events:** `billing.succeeded`, `billing.failed` (`nextRetryAt` null means it paused) and `billing.chargeback`, for Step 10's emails and Flow triggers. Step 10 finds the late-renewal notice's people from `termEndsAt` passed and a balance above 0, so nothing writes an Event for that (see "Emails, Flow and the member tag").
+
+### Emails, Flow and the member tag (2026-11-04)
+
+Technical choices from Step 10 that Steps 11, 12, 13, 15 and 16 live with. Checked on `newstand-dev`, with every email sent to a public test inbox.
+
+**Provider and sender**
+
+- **Cloudflare Email Service** (open beta), behind one function, `sendEmail` in `app/email-send.server.ts`. It needs the Workers Paid plan the app already has: 3,000 emails a month are included and more cost $0.35 per 1,000. Cake Zine's 1,000 subscribers and a few emails per issue fit the 3,000 in any month.
+- **One sending address for every shop**, `EMAIL_FROM_ADDRESS` in `wrangler.jsonc` (dev: `no-reply@mail.chill.cool`). The From name is the shop's name and the Reply-To is the shop's contact email, both read from Shopify at send time. Merchants can't send from their own domains, because Email Service needs the domain on Cloudflare DNS. **The production domain is undecided and is N's call before anything is installed on Cake Zine's real store** (Step 16).
+- **Limits** (from Cloudflare's docs): up to 50 recipients a message and 25 MiB. A new account starts with a "conservative" daily quota that grows with use, and no figure is published for it or for a per-second rate. So a slice sends 20 emails one after another, and Cloudflare saying `E_RATE_LIMIT_EXCEEDED` or `E_DAILY_LIMIT_EXCEEDED` isn't a failure: the slice stops, leaves every row pending with its attempt kept, and the next slice is enqueued 60 seconds later (an hour for the daily limit). Sender or account trouble (`E_SENDER_NOT_VERIFIED`, `E_SENDER_DOMAIN_NOT_AVAILABLE`, `E_ACCOUNT_SUSPENDED`) waits the same way, because it isn't the customer's fault. Watch `email.waiting` on Cake Zine's first pre-order: if the daily quota is below 1,000, request an increase with Cloudflare's form well before it.
+- **No idempotency key**, so the guard against a double send is ours (below).
+- **Dev safety:** an optional secret, `EMAIL_RECIPIENT_DOMAINS`, makes the sender mail only addresses at those domains and skip the rest (`recipient_not_allowed`). It is set on the dev Worker to `mailinator.com`, because the dev store's customers have made-up addresses. **Delete it (`wrangler secret delete EMAIL_RECIPIENT_DOMAINS`) when Cake Zine's real store is installed.**
+
+**Exactly once**
+
+- One `EmailSend` row per email per subscription per subject, its ID `kind:subscriptionId:subject` (the subject is a release, an event, a price change, a term date or a Delivery), written before anything is sent. `ON CONFLICT DO NOTHING` makes queueing repeatable. The row holds no names, addresses or text.
+- A slice claims a row (`SENDING`, with a lease) just before the provider call, after everything else has been read, and stores the answer after it. What a crash does: **before the claim**, the row is still `PENDING` and goes out later; **between the claim and the stored answer**, the row stays `SENDING`, and once its lease lapses it becomes `UNSURE` and is logged as `email.unsure`. It may or may not have been sent, so it is never sent again by itself. A missing email was judged less bad than a second one. N's decision: the merchant is alerted in the admin and chooses whether to send it again (Step 13). Until then, to send it anyway, set the row back to `PENDING`. **After the answer is stored**, nothing is left to do.
+- A hiccup on Cloudflare's side (`E_INTERNAL_SERVER_ERROR`, or an error with no code) puts the row back to `PENDING` for ten minutes later, up to five tries, and then `FAILED`. A refusal (suppressed address, bad content) is `FAILED` at once, with Cloudflare's error code in `reason`. Neither re-sends anything that went.
+- **Every email is judged again at send time** (`staleReason`): switched off, subscriber ended or redacted, cancelled with nothing left, release moved on, card fixed, renewed since. It then becomes `SKIPPED` with the reason.
+- **Switched-off emails still get a row**, `SKIPPED` (`switched_off`), so turning one back on never sends what was missed. Each email also only goes for something recent (welcome 2 days, pre-order 7, failed payment 3, last release 7, late renewal 7), so a first deploy, an outage or an import doesn't mail old news.
+- **State-driven, like a run:** the tick starts an `email.run` job per installed shop every hour (the hour is in its ID); it queues what's due and sends a page of 20, chaining to the next. A merchant's announce and a new sign-up start one at once. A lost message or a crash is found again by the next tick.
+
+**Each email**
+
+| Email | Goes when | To | Off switch |
+| --- | --- | --- | --- |
+| Welcome | A new sign-up, not imported or gifted, still active | The subscriber | `welcome` |
+| Pre-order announced | The pre-order opens (button or tick) | Whoever a run would assign the release to (`DUE_SUBSCRIPTION`) or who already has a Delivery on it, who signed up before the announcement; not a chargeback. Paused subscribers get "update your card" as the main button. With orders created at the pre-order (`PREORDER_OPENS`), it says so and has no address button | `preorderAnnounced` |
+| Upcoming charge, dated | 21 days before a bundle's `termEndsAt`, for `TERM_DATE` and `TERM_DATE_HOLD_IF_LATE`. California asks for 15 to 45 days' notice of a yearly auto-renewal | Active, auto-renewing, not a gift, no payment problem | `upcomingCharge` |
+| Upcoming charge, per release | With a release's pre-order, for a charge that happens when it starts shipping: a pay-per-release subscriber at 0, or a bundle on `ON_DEPLETION` whose last paid release this is. A release can have no date, so the pre-order is the only warning there is. Not under `PREORDER_OPENS`: the charge is made at that moment and Shopify's receipt is the notice | Same | `upcomingCharge` |
+| Upcoming charge, held | The term date has passed with a paid release still to ship: the renewal is on hold and will be charged when that release's order is created | Same | `upcomingCharge` (no toggle of its own) |
+| Failed payment | One per failed try (`billing.failed`): the first two say when it retries, the last says it paused | `ACTIVE` or `PAUSED`, not yet fixed | `failedPayment` |
+| Last release shipping | A subscriber's last paid release's order is created and nothing renews after it: cancelled, a plan without auto-renew, or a gift | Not a chargeback | `lastReleaseShipping` |
+| Price-change notice | When a price rise is saved with `APPLY_AT_RENEWAL` | Subscribers who signed up at the old price, active or paused, not gifts | **None.** See below |
+
+- **The price-change notice has no switch**, and is sent even if every email is off. It is what makes N's 30 days' notice real, so letting a merchant turn it off would break the promise. Their lever is the plan form's policy (`KEEP_OLD_PRICE`). `PriceChange.noticeSentAt` is set once all its emails have settled, or at once if nobody needs one. `effectiveAt` is 30 days from saving, so a notice delayed by hours is a little under 30 days. **Charging doesn't check `noticeSentAt`** (Step 10 changes no charging); Step 15 should consider refusing to apply a price whose notice wasn't sent.
+- **No app shipment email**, and nothing duplicates Shopify's order confirmation on billing orders, as N accepted. The upcoming-charge and failed-payment copy is written knowing the customer also gets Shopify's.
+- **Amounts in the upcoming-charge and price-change emails** are what a charge bills: each copy at the line price times the quantity, plus the contract's own `deliveryPrice` (read from Shopify in the slice's one query, together with the customers), and the copy says "plus any tax". A charge's tax wasn't measured, so it isn't stated. A price-change notice gives the old and new totals the same way, so a $15 line with $8 shipping reads $23 to $28. A contract Shopify no longer has gets no email (`no_contract`).
+- **Release word and shop name** come from the shop in every email: the words from `Shop.releaseWord*`, the name from Shopify. Copy is in `app/email-templates.ts`, in code. Merchant-editable wording is for Step 17.
+- **Personal data:** an address is read from Shopify in the job, in one query per slice, used and dropped; nothing is stored or logged, only IDs. A guest customer (`DISABLED`) still has an address and is reached (checked live). A customer with no address, a deleted one and a `redacted` one get nothing.
+
+**The signed link, and what Step 11 must do with it**
+
+- Buttons go to `/l/<token>` on the app (`app/routes/l.$token.tsx`, public). The token is `base64url(JSON {k, s, r, e}).HMAC`: a kind (`address` or `card`), the subscription ID, the release ID (for an address link) and an expiry 30 days out, signed with a key derived from `SHOPIFY_API_SECRET`. It holds no customer data. **Until Step 11, the page only says whether the link is good, and says the page isn't ready yet.** It records nothing and changes nothing.
+- **Step 11 must** replace that page, using `verifyLinkToken` (`app/email-link.server.ts`): for an `address` link, send the customer to the portal's address page and call **`recordAddressConfirmation(rawDb, s, r)`** (`app/emails.server.ts`) when they confirm; for a `card` link, send them to the card page. `recordAddressConfirmation` marks the Delivery for that subscription and release if it exists, and also the pre-order email's `EmailSend` row, because under the default `READY_TO_SHIP` timing the Delivery doesn't exist yet when the email goes out. `createDueDeliveries` copies that mark into the Delivery when it creates it. It keeps the first time.
+- **Anyone holding the link can use it until it expires**, such as whoever reads a shared inbox. So it should authorize nothing beyond recording that the address was confirmed, and anything that shows or changes personal data (the address itself, the card) must need the customer to sign in. A card update's `billing.resume` job is as before.
+- For gifts (Step 12), the pre-order email should go to the recipient: `EmailSend` goes to the subscription's `customerGid`, so a gift's subscription must carry the recipient there.
+
+**Flow triggers** (`extensions/flow-triggers`, sent with `flowTriggerReceive` from `app/flow.server.ts`, once each through `Event.sentToFlowAt`):
+
+| Trigger | From | Fields |
+| --- | --- | --- |
+| Subscription started | `subscription.started`, written with the Subscription | customer, Plan |
+| Subscription payment failed | `billing.failed` | customer, Plan, Will retry |
+| Subscription paused or cancelled | `subscription.paused` (a failed payment that paused it), `billing.chargeback`, `subscription.cancelled` (written by `markCancelled`) | customer, Plan, Status, Reason |
+| Last release shipped | `subscription.last_release_shipped`, derived from state like the email | customer, Plan |
+
+- **Custom apps and Flow (found in Step 10):** Shopify's docs say custom app triggers are only available on Plus stores and Plus development stores. We saw it on `newstand-dev`, a non-Plus development store ("Basic App Development"): after installing Flow, its editor listed no trigger from this app, with or without the installed-apps filter. Cake Zine is on Basic, so **on a custom install its merchant couldn't use these triggers at all**; Step 16's install-type decision must weigh that alongside Functions. **Unverified:** a workflow actually receiving a trigger. What was checked is that Shopify accepts each trigger's handle and payload through `flowTriggerReceive` and rejects an unknown handle or a missing field.
+- Shopify allows only letters and spaces in a trigger field's key, and the payload uses the key as written, so the keys are "Plan", "Will retry", "Status" and "Reason". Flow reads the customer itself from `customer_id`.
+- **At most once:** an event is claimed (`sentToFlowAt`) before it's sent. If Flow can't be reached the claim is given back and the next tick tries again; if the Worker dies between the claim and the answer, that one trigger is lost. Flow can't be asked whether it arrived, and running a workflow twice (a second Klaviyo email) was judged worse. Refused triggers log `flow.refused` and aren't retried. Only events from the last 3 days are sent.
+
+**The member discount tag** (`app/member-tag.server.ts`)
+
+- A customer should have `Shop.memberDiscountTag` (default `active-subscriber`) if any of their subscriptions in the shop qualifies: `ACTIVE`, or `CANCELLED` or `PAUSED` with `releasesRemaining` above 0 (paid releases whose orders aren't created). A chargeback, an ended or a redacted subscription never qualifies. It comes off after the last paid release's order is created, which is when its shipping starts.
+- State-driven: a `member.tag` job per shop per hour compares what each customer should have with `MemberTag`, what the app last put on them, and fixes the difference with `tagsAdd` and `tagsRemove`, which work for guests. A new sign-up gets its own job at once. A renamed tag is moved, and clearing the setting removes the tag. Every step is repeatable. **A tag a merchant removes by hand in Shopify isn't noticed**, because Shopify isn't read, only the app's record.
+- **What a merchant must set up in Shopify:** an automatic discount whose customer eligibility is a customer segment such as `customer_tags CONTAINS 'active-subscriber'`. The app only tags. Not tested here.
+
+**GDPR:** `EmailSend` and `MemberTag` are new tables. `customers/redact` deletes the customer's rows from both; `shop/redact` deletes them before the Subscriptions and the Shop; `customers/data_request` lists what was sent (kind, status, time) and never what it said.
 
 ## Cake Zine facts
 

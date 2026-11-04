@@ -2,6 +2,7 @@ import type { createDb } from "./db.server";
 import { billingAttemptKey } from "./jobs/idempotency.server";
 import type { DueWorkFinder, Job } from "./jobs/runner.server";
 import { describeError, logEvent } from "./logger.server";
+import { PAUSED_EVENT } from "./notification-jobs";
 import type { Graphql } from "./plan-sync.server";
 import {
   addMonths,
@@ -683,6 +684,10 @@ async function recordFailure(
       errorCode,
       nextRetryAt,
     }),
+    // For Flow, when the failure also paused the subscription.
+    ...(paused && subscription.status === "ACTIVE"
+      ? [eventStatement(rawDb, attemptId, PAUSED_EVENT, subscription.shopId, subscriptionId, { chargeFor })]
+      : []),
     rawDb
       .prepare(
         `UPDATE "BillingAttempt" SET "result" = 'FAILED', "errorCode" = ?2, "nextRetryAt" = ?3,

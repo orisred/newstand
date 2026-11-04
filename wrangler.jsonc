@@ -15,8 +15,14 @@
     "SHOPIFY_APP_URL": "https://release-subscriptions.ne-dev.workers.dev",
     // Keep in step with access_scopes.scopes in shopify.app.toml.
     "SCOPES": "write_products,read_customers,write_customers,read_customer_payment_methods,write_own_subscription_contracts,write_orders,write_merchant_managed_fulfillment_orders,write_validations,read_shopify_payments_disputes",
-    "SHOP_CUSTOM_DOMAIN": ""
+    "SHOP_CUSTOM_DOMAIN": "",
+    // The one sending address for every shop. Its domain must be onboarded for Email Sending in
+    // Cloudflare. Each shop sets only the From name (its name) and the Reply-To (its contact email).
+    "EMAIL_FROM_ADDRESS": "no-reply@mail.chill.cool"
   },
+  // Cloudflare Email Service. Needs the Workers Paid plan. Optional secret EMAIL_RECIPIENT_DOMAINS:
+  // when set (comma-separated domains), mail goes only to addresses at those domains. For dev stores.
+  "send_email": [{ "name": "EMAIL", "remote": true }],
   // Set with `wrangler secret put` for production and in .dev.vars locally:
   //   SHOPIFY_API_SECRET
   "secrets": { "required": ["SHOPIFY_API_SECRET"] },

@@ -1046,6 +1046,9 @@ describe("a failed card", () => {
     });
     expect((await row(subscriber.id)).status).toBe("ACTIVE");
     expect((await deliveryOf(subscriber.id, release.id))?.status).toBe("HELD");
+    const eventsOf = (type: string) => db().event.count({ where: { subscriptionId: subscriber.id, type } });
+    expect(await eventsOf("billing.failed")).toBe(1);
+    expect(await eventsOf("subscription.paused")).toBe(0); // still retrying: Flow hears of the failure only
 
     // Not before its date.
     expect(
@@ -1068,6 +1071,8 @@ describe("a failed card", () => {
     attempts = await attemptsOf(subscriber.id);
     expect(attempts.map((a) => a.attempt)).toEqual([1, 2, 3]);
     expect(attempts[2].nextRetryAt).toBeNull();
+    expect(await eventsOf("billing.failed")).toBe(3);
+    expect(await eventsOf("subscription.paused")).toBe(1); // the last try also paused it, once
     expect(await row(subscriber.id)).toMatchObject({
       status: "PAUSED",
       pausedReason: "FAILED_PAYMENT",

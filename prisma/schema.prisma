@@ -32,6 +32,8 @@ model Shop {
   plans                Plan[]
   subscriptions        Subscription[]
   events               Event[]
+  emailSends           EmailSend[]
+  memberTags           MemberTag[]
 }
 
 enum ReleaseStatus {
@@ -171,6 +173,7 @@ model Subscription {
   deliveries         Delivery[]
   billingAttempts    BillingAttempt[]
   events             Event[]
+  emailSends         EmailSend[]
 
   @@index([shopId, status])
   @@index([shopId, paymentProblemSince])
@@ -259,6 +262,52 @@ model Event {
   createdAt       DateTime      @default(now())
 
   @@index([shopId, type, createdAt])
+}
+
+enum EmailStatus {
+  PENDING  // queued, or put back after a limit or a Cloudflare hiccup
+  SENDING  // claimed; a lapsed claim is UNSURE, never sent again by itself
+  SENT
+  SKIPPED  // switched off, the subscriber changed state, or there is nobody to send to
+  FAILED   // refused for good; `reason` is Cloudflare's error code
+  UNSURE   // claimed and never settled: it may or may not have been sent
+}
+
+// One row per email per subscription per subject, written before sending: what makes an email once-only.
+// `id` is kind:subscriptionId:subject, with the release, event or price change as the subject.
+// No names, addresses or message text are kept.
+model EmailSend {
+  id             String       @id
+  shopId         String
+  shop           Shop         @relation(fields: [shopId], references: [id])
+  subscriptionId String
+  subscription   Subscription @relation(fields: [subscriptionId], references: [id])
+  kind           String       // an EmailKey, or priceChange
+  subject        String
+  status         EmailStatus  @default(PENDING)
+  attempts       Int          @default(0)
+  leaseUntil     DateTime?
+  reason         String?      // why it was skipped or failed: a code, never a message
+  messageId      String?
+  sentAt         DateTime?
+  addressConfirmedAt DateTime? // pre-order email only: the CTA, before the Delivery exists. See DECISIONS.md
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([shopId, status])
+  @@index([subscriptionId])
+}
+
+// The member discount tag the app last put on a customer in a shop, so a tick can tell who has drifted.
+model MemberTag {
+  id          String   @id // shopId:customerGid
+  shopId      String
+  shop        Shop     @relation(fields: [shopId], references: [id])
+  customerGid String
+  tag         String?  // null = the app has put no tag on them
+  updatedAt   DateTime @updatedAt
+
+  @@index([shopId])
 }
 
 enum JobRunStatus {

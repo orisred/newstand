@@ -174,13 +174,18 @@ const deliveriesOf = (releaseId: string) =>
 
 function fakeQueue() {
   const sent: { body: Job; delaySeconds?: number }[] = [];
+  // Announcing a pre-order also starts the shop's emails, which these tests aren't about.
+  const emails: { body: Job; delaySeconds?: number }[] = [];
   return {
     sent,
+    emails,
     env: {
       DB: env.DB,
       JOBS: {
         sendBatch: async (messages: any[]) => {
-          sent.push(...messages);
+          for (const message of messages) {
+            (message.body.type === "email.run" ? emails : sent).push(message);
+          }
         },
       },
     } as any,
@@ -440,6 +445,8 @@ describe("a run", () => {
       const queue = fakeQueue();
       await moveRelease(db(), queue.env, shop, release.id, "announce");
       expect(queue.sent).toHaveLength(jobs);
+      // Subscribers hear of the pre-order at once, whatever the order timing.
+      expect(queue.emails.map((message) => message.body.shop)).toEqual([shop.shopDomain]);
     }
   });
 

@@ -128,7 +128,7 @@ export default function Settings() {
           <s-section heading="Emails">
             <s-stack gap="small">
               <s-paragraph>
-                Choose which emails the app sends. Nothing sends yet.
+                Choose which emails the app sends to subscribers. Turning one off stops it from then on, and turning it back on doesn&apos;t send the ones missed in between. The notice of a price rise has no switch: it is what gives subscribers their 30 days&apos; notice.
               </s-paragraph>
               {(Object.keys(EMAIL_LABELS) as EmailKey[]).map((key) => (
                 <s-checkbox
