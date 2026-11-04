@@ -9,7 +9,7 @@ import {
   OrderBusy,
   OrderThrottled,
 } from "../app/release-orders.server";
-import { listWaitingOrders, setReleaseProduct } from "../app/releases.server";
+import { listRunProgress, setReleaseProduct } from "../app/releases.server";
 import { getOrCreateShop } from "../app/shop.server";
 
 beforeAll(async () => {
@@ -70,11 +70,14 @@ function fakeShopify(options: { address?: any; errors?: string[] } = {}) {
       }
       const order = {
         id: `gid://shopify/Order/${++n}`,
+        name: `#${n}`,
         sourceIdentifier: variables.order.sourceIdentifier,
         input: variables,
       };
       orders.push(order);
-      return { orderCreate: { order: { id: order.id }, userErrors: [] } };
+      return {
+        orderCreate: { order: { id: order.id, name: order.name }, userErrors: [] },
+      };
     }
     throw new Error(`Unexpected query: ${query}`);
   };
@@ -157,6 +160,7 @@ describe("createDeliveryOrder", () => {
       shippingAddress: ADDRESS,
       financialStatus: "PAID",
       sourceIdentifier: `${DELIVERY_MARKER}${delivery.id}`,
+      tags: ["release-subscriptions", "release-1"],
     });
     expect(order.lineItems).toEqual([
       {
@@ -190,6 +194,7 @@ describe("createDeliveryOrder", () => {
     expect(await deliveryRow(delivery.id)).toMatchObject({
       status: "ORDERED",
       orderGid: shopify.orders[0].id,
+      orderName: shopify.orders[0].name,
       orderLeaseUntil: null,
     });
     expect(await remaining(subscription.id)).toBe(1);
@@ -199,6 +204,45 @@ describe("createDeliveryOrder", () => {
     ).toBe("already");
     expect(shopify.orders).toHaveLength(1);
     expect(await remaining(subscription.id)).toBe(1);
+  });
+
+  describe("the paid balance", () => {
+    it("with nothing paid: makes no order and leaves the Delivery waiting", async () => {
+      const { delivery, subscription } = await setup();
+      await db().subscription.update({
+        where: { id: subscription.id },
+        data: { releasesRemaining: 0 },
+      });
+      const shopify = fakeShopify();
+      expect(
+        await createDeliveryOrder(db(), env.DB, shopify.graphql, delivery.id),
+      ).toBe("no_balance");
+      expect(shopify.orders).toHaveLength(0);
+      expect(await deliveryRow(delivery.id)).toMatchObject({
+        status: "PENDING",
+        orderLeaseUntil: null,
+      });
+      expect(await remaining(subscription.id)).toBe(0);
+    });
+
+    it("an order that already exists is recorded even so, and never goes negative", async () => {
+      const { delivery, subscription } = await setup();
+      const shopify = fakeShopify();
+      const start = new Date("2026-06-01T00:00:00Z");
+      await expect(
+        createDeliveryOrder(db(), crashingOnBatch(), shopify.graphql, delivery.id, start),
+      ).rejects.toThrow("crash");
+      await db().subscription.update({
+        where: { id: subscription.id },
+        data: { releasesRemaining: 0 },
+      });
+      const later = new Date(start.getTime() + 6 * 60 * 1000);
+      expect(
+        await createDeliveryOrder(db(), env.DB, shopify.graphql, delivery.id, later),
+      ).toBe("recovered");
+      expect((await deliveryRow(delivery.id)).status).toBe("ORDERED");
+      expect(await remaining(subscription.id)).toBe(0);
+    });
   });
 
   it("doesn't count a release before its order exists", async () => {
@@ -329,14 +373,20 @@ describe("createDeliveryOrder", () => {
       expect((await deliveryRow(delivery.id)).status).toBe("PENDING");
       expect(await remaining(subscription.id)).toBe(2);
       expect(
-        await listWaitingOrders(db(), shop.orderTiming, [
+        await listRunProgress(db(), shop.orderTiming, [
           { id: release.id, status: "SHIPPED" },
         ]),
-      ).toEqual({ [release.id]: { count: 1, error: null } });
+      ).toEqual({
+        [release.id]: { ordered: 0, waiting: 1, refused: 0, error: null },
+      });
     });
 
-    it("choosing a product queues the waiting order under a new job ID", async () => {
+    it("choosing a product runs the release under a new job ID, and clears refusals", async () => {
       const { delivery, shop, release } = await setup({ productGid: null });
+      await db().delivery.update({
+        where: { id: delivery.id },
+        data: { orderError: "Refused" },
+      });
       const sent: any[] = [];
       const jobsEnv = {
         JOBS: { sendBatch: async (messages: any[]) => sent.push(...messages) },
@@ -354,8 +404,12 @@ describe("createDeliveryOrder", () => {
         ).toBe(true);
       }
       expect(sent).toHaveLength(2);
-      expect(sent[0].body.data).toEqual({ deliveryId: delivery.id });
+      expect(sent[0].body).toMatchObject({
+        type: "release.run",
+        data: { releaseId: release.id },
+      });
       expect(sent[0].body.id).not.toBe(sent[1].body.id);
+      expect((await deliveryRow(delivery.id)).orderError).toBeNull();
     });
 
     it("refuses a product that isn't a variant, or another shop's release", async () => {

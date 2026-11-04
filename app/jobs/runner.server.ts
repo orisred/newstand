@@ -43,11 +43,15 @@ export type DueWorkFinder = (
 ) => Promise<Job[]>;
 
 /** Enqueues jobs. For merchant actions as well as the tick. Safe to repeat for the same IDs. */
-export async function enqueueJobs(env: Env, jobs: Job[]) {
+export async function enqueueJobs(
+  env: Pick<Env, "JOBS">,
+  jobs: Job[],
+  delaySeconds?: number,
+) {
   for (let i = 0; i < jobs.length; i += SEND_BATCH_LIMIT) {
     const messages = jobs
       .slice(i, i + SEND_BATCH_LIMIT)
-      .map((body) => ({ body }));
+      .map((body) => (delaySeconds ? { body, delaySeconds } : { body }));
     await env.JOBS.sendBatch(messages);
   }
 }

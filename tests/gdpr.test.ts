@@ -331,27 +331,22 @@ describe("the contract route", () => {
     revision_id: "42",
   };
 
-  it("enqueues one job with a stable ID, so a repeat runs once", async () => {
-    const first = await deliver(
-      contractHook,
-      "subscription_contracts/create",
-      "s.myshopify.com",
-      PAYLOAD,
-    );
-    const update = await deliver(
-      contractHook,
-      "subscription_contracts/update",
-      "s.myshopify.com",
-      PAYLOAD,
-    );
-    expect(first.status).toBe(200);
-    expect(first.jobs[0]).toEqual({
+  it("keys the job on the webhook, so Shopify's retry runs once and a cancel still runs", async () => {
+    const send = (topic: string) =>
+      deliver(contractHook, topic, "s.myshopify.com", PAYLOAD);
+    const created = await send("subscription_contracts/create");
+    const retried = await send("subscription_contracts/create");
+    // Cancelling a contract leaves its revision as it was.
+    const cancelled = await send("subscription_contracts/update");
+    expect(created.status).toBe(200);
+    expect(created.jobs[0]).toEqual({
       type: "contract.sync",
-      id: "contract.sync:gid://shopify/SubscriptionContract/1:42",
+      id: "contract.sync:gid://shopify/SubscriptionContract/1:webhook-subscription_contracts/create-s.myshopify.com",
       shop: "s.myshopify.com",
       data: { contractGid: PAYLOAD.admin_graphql_api_id },
     });
-    expect(update.jobs[0].id).toBe(first.jobs[0].id);
+    expect(retried.jobs[0].id).toBe(created.jobs[0].id);
+    expect(cancelled.jobs[0].id).not.toBe(created.jobs[0].id);
   });
 
   it("rejects a bad signature", async () => {

@@ -44,6 +44,7 @@ export async function recordDataRequest(
       deliveries: {
         select: {
           orderGid: true,
+          orderName: true,
           status: true,
           addressConfirmedAt: true,
           release: { select: { number: true, title: true } },

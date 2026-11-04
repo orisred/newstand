@@ -54,6 +54,8 @@ A job that keeps failing is retried with backoff for about half an hour, then go
 
 Logs are JSON with `event`, `jobType`, `jobId` and `shop`. Find failures in the Workers logs by searching for `job.failed` or `job.dead`. Search `payment_order.not_visible` for payment orders the app couldn't mark, and `delivery.duplicate_orders` for a repeated $0 order.
 
+A release's run recovers by itself: the tick starts a new chain of `release.run` slices every hour for each open release at its order step, so don't resend a dead one. Search `release_run.throttled` for Shopify's limit at work, and `release_run.left_for_tick` or `release_run.order_failed` for orders that keep failing. See "Release runs" in `docs/DECISIONS.md`.
+
 Then follow `docs/BUILD_STEPS.md`, one agent thread per step.
 
 ## Docs

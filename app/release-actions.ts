@@ -3,8 +3,8 @@ export type ReleaseStatus =
 
 /**
  * The only legal moves. Shared with the UI so it shows exactly the buttons the server
- * accepts. Cancel is not allowed once a release is ready to ship: Step 8 creates orders
- * at that point (or at pre-order, under PREORDER_OPENS timing) and will revisit it.
+ * accepts. Cancel also needs no order to exist yet, because orders can start at pre-order
+ * under PREORDER_OPENS timing. `transitionRelease` checks that against the Deliveries.
  */
 export const RELEASE_ACTIONS = {
   announce: { from: ["UNANNOUNCED"], to: "PREORDER" },

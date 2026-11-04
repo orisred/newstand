@@ -50,9 +50,7 @@ describe("transitionRelease", () => {
       it(`${action} from ${from} is ${legal ? "allowed" : "refused"}`, async () => {
         const shop = await newShop();
         const id = await releaseWithStatus(shop.id, from);
-        const result = await transitionRelease(
-          db(),
-          shop.id,
+        const result = await transitionRelease(db(), env.DB, shop.id,
           id,
           action,
           "issue",
@@ -82,19 +80,19 @@ describe("transitionRelease", () => {
 
     const t1 = new Date("2027-01-01T10:00:00.000Z");
     const t2 = new Date("2027-02-01T10:00:00.000Z");
-    await transitionRelease(db(), shop.id, id, "announce", "issue", t1);
+    await transitionRelease(db(), env.DB, shop.id, id, "announce", "issue", t1);
     release = await read();
     expect(release.status).toBe("PREORDER");
     expect(release.preorderOpensAt).toEqual(t1);
     expect(release.cutoffAt).toBeNull();
 
-    await transitionRelease(db(), shop.id, id, "ready", "issue", t2);
+    await transitionRelease(db(), env.DB, shop.id, id, "ready", "issue", t2);
     release = await read();
     expect(release.status).toBe("READY");
     expect(release.preorderOpensAt).toEqual(t1);
     expect(release.cutoffAt).toEqual(t2);
 
-    await transitionRelease(db(), shop.id, id, "ship", "issue");
+    await transitionRelease(db(), env.DB, shop.id, id, "ship", "issue");
     release = await read();
     expect(release.status).toBe("SHIPPED");
     expect(release.cutoffAt).toEqual(t2);
@@ -105,10 +103,8 @@ describe("transitionRelease", () => {
     const id = await releaseWithStatus(shop.id, "UNANNOUNCED");
     const t1 = new Date("2027-01-01T10:00:00.000Z");
     const results = await Promise.all([
-      transitionRelease(db(), shop.id, id, "announce", "issue", t1),
-      transitionRelease(
-        db(),
-        shop.id,
+      transitionRelease(db(), env.DB, shop.id, id, "announce", "issue", t1),
+      transitionRelease(db(), env.DB, shop.id,
         id,
         "announce",
         "issue",
@@ -129,9 +125,7 @@ describe("transitionRelease", () => {
   it("a stale tab pressing a move that is no longer legal changes nothing", async () => {
     const shop = await newShop();
     const id = await releaseWithStatus(shop.id, "READY");
-    const result = await transitionRelease(
-      db(),
-      shop.id,
+    const result = await transitionRelease(db(), env.DB, shop.id,
       id,
       "announce",
       "drop",
@@ -147,9 +141,7 @@ describe("transitionRelease", () => {
     const mine = await newShop();
     const theirs = await newShop();
     const id = await releaseWithStatus(theirs.id, "UNANNOUNCED");
-    const result = await transitionRelease(
-      db(),
-      mine.id,
+    const result = await transitionRelease(db(), env.DB, mine.id,
       id,
       "announce",
       "issue",

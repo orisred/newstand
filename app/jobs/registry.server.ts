@@ -9,6 +9,12 @@ import { markPaymentOrderFulfilled } from "../payment-orders.server";
 import { graphqlOf, syncPlan } from "../plan-sync.server";
 import { SYNC_JOB } from "../plans.server";
 import { createDeliveryOrder } from "../release-orders.server";
+import {
+  findReleaseRuns,
+  findScheduledSteps,
+  runReleaseSlice,
+} from "../release-runs.server";
+import { fireScheduledRelease } from "../releases.server";
 import { getOrCreateShop } from "../shop.server";
 import { unauthenticated } from "../shopify.server";
 import {
@@ -17,6 +23,8 @@ import {
   findMissedContracts,
   PAYMENT_ORDER_JOB,
   RECONCILE_JOB,
+  RELEASE_FIRE_JOB,
+  RELEASE_RUN_JOB,
   syncContract,
 } from "../subscriptions.server";
 import { logEvent } from "../logger.server";
@@ -28,7 +36,7 @@ async function shopGraphql(shop: string | undefined) {
   return graphqlOf(admin);
 }
 
-// Steps 8 to 10 add their job types and finders here.
+// Steps 9 and 10 add their job types and finders here.
 export const jobHandlers: Record<string, JobHandler> = {
   // Brings one plan's selling plan group in line with the plan. Queued by the plan screens.
   [SYNC_JOB]: async (job, { db }) => {
@@ -72,6 +80,22 @@ export const jobHandlers: Record<string, JobHandler> = {
     logEvent("info", "delivery.order_job", { jobId: job.id, result });
   },
 
+  // One slice of a release's run. It ends by enqueueing the next, and never by failing on a limit.
+  [RELEASE_RUN_JOB]: async (job, { db, env }) => {
+    const next = await runReleaseSlice(db, env.DB, () => shopGraphql(job.shop), job);
+    if (next) await enqueueJobs(env, [next.job], next.delaySeconds);
+  },
+
+  [RELEASE_FIRE_JOB]: async (job, { db, env }) => {
+    const shop = await getOrCreateShop(db, job.shop!);
+    await fireScheduledRelease(
+      db,
+      env,
+      { ...shop, shopDomain: job.shop! },
+      String(job.data?.releaseId),
+    );
+  },
+
   [PAYMENT_ORDER_JOB]: async (job) => {
     const graphql = await shopGraphql(job.shop);
     await markPaymentOrderFulfilled(graphql, String(job.data?.orderGid));
@@ -106,4 +130,8 @@ const findMissedContractWork: DueWorkFinder = async ({ env, now }) => {
   }));
 };
 
-export const dueWorkFinders: DueWorkFinder[] = [findMissedContractWork];
+export const dueWorkFinders: DueWorkFinder[] = [
+  findMissedContractWork,
+  findScheduledSteps,
+  findReleaseRuns,
+];

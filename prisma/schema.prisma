@@ -25,6 +25,7 @@ model Shop {
   memberDiscountTag    String?        @default("active-subscriber")
   orderTiming          OrderTiming    @default(READY_TO_SHIP)
   emailsEnabled        Json           @default("{}")
+  timezone             String?        // IANA name from Shopify, for showing and entering release dates
   createdAt            DateTime       @default(now())
   updatedAt            DateTime       @updatedAt
   releases             Release[]
@@ -59,12 +60,13 @@ model Release {
   title        String
   productGid   String?       // the Shopify variant on this release's $0 orders; null until chosen
   productTitle String?       // as picked, so pages need no Admin API call
-  preorderOpensAt DateTime?  // switchover; null until announced
-  cutoffAt     DateTime?     // ready to ship; null until known
+  preorderOpensAt DateTime?  // when the pre-order opened; before that, only the planned date of a scheduled release
+  cutoffAt     DateTime?     // when it went ready to ship; before that, only the planned date of a scheduled release
   shipAt       DateTime?
   triggerMode  TriggerMode   @default(MANUAL)
   quantity     Int?          // optional cap; null = no cap
   status       ReleaseStatus @default(UNANNOUNCED)
+  runLeaseUntil DateTime?    // set while a run's slice works or sleeps, so one chain of jobs runs per release
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
   deliveries   Delivery[]
@@ -188,6 +190,7 @@ model Delivery {
   releaseId       String
   release         Release        @relation(fields: [releaseId], references: [id])
   orderGid        String?        @unique
+  orderName       String?        // such as #1017, for the run's CSV; not personal data
   status          DeliveryStatus @default(PENDING)
   addressConfirmedAt DateTime?   // from the pre-order email's main CTA
   orderLeaseUntil DateTime?      // set while an order is being created, so two never run at once
