@@ -377,7 +377,7 @@ describe("createDeliveryOrder", () => {
           { id: release.id, status: "SHIPPED" },
         ]),
       ).toEqual({
-        [release.id]: { ordered: 0, waiting: 1, refused: 0, error: null },
+        [release.id]: { ordered: 0, waiting: 1, refused: 0, held: 0, error: null },
       });
     });
 

@@ -36,8 +36,7 @@ export type PaymentOrderResult =
 
 /**
  * Marks the subscription lines of a payment order fulfilled, without telling the customer: the
- * order records payment, and the release ships on its own $0 order. Step 9 uses this for billing
- * orders too.
+ * order records payment, and the release ships on its own $0 order. Billing orders come here too.
  *
  * Only lines belonging to a subscription contract are touched, so another product bought in
  * the same checkout still ships. A $0 release order has none and also carries a marker, and is

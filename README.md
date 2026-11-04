@@ -56,6 +56,8 @@ Logs are JSON with `event`, `jobType`, `jobId` and `shop`. Find failures in the 
 
 A release's run recovers by itself: the tick starts a new chain of `release.run` slices every hour for each open release at its order step, so don't resend a dead one. Search `release_run.throttled` for Shopify's limit at work, and `release_run.left_for_tick` or `release_run.order_failed` for orders that keep failing. See "Release runs" in `docs/DECISIONS.md`.
 
+Charges recover the same way: the tick finds renewals due, retries due and attempts with no result. Search `billing.failed` for failed charges, `billing.unknown_attempt` for a charge the app didn't make, and `session.refresh_rejected` for a shop whose token has died. See "Renewals and charges" in `docs/DECISIONS.md`.
+
 Then follow `docs/BUILD_STEPS.md`, one agent thread per step.
 
 ## Docs

@@ -1,7 +1,7 @@
 const STATUS_TEXT: Record<string, string> = {
   PENDING: "Waiting for an order",
   ORDERED: "Order created",
-  HELD: "Held",
+  HELD: "Held: waiting for payment",
   FULFILLED: "Fulfilled",
   CANCELLED: "Cancelled",
 };

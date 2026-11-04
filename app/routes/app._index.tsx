@@ -13,7 +13,9 @@ import {
 } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
+import { resumeJob } from "../billing.server";
 import { createDb } from "../db.server";
+import { enqueueJobs } from "../jobs/runner.server";
 import { graphqlOf } from "../plan-sync.server";
 import {
   actionsFor,
@@ -24,6 +26,7 @@ import {
 import { formatZoned, zonedFields, zonedToUtc } from "../release-dates";
 import {
   createRelease,
+  listPaymentProblems,
   listReleases,
   listRunProgress,
   moveRelease,
@@ -74,8 +77,9 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       release.preorderOpensAt && zonedFields(release.preorderOpensAt, timezone),
     cutoffFields: release.cutoffAt && zonedFields(release.cutoffAt, timezone),
   }));
-  const [runs, mixed] = await Promise.all([
+  const [runs, problems, mixed] = await Promise.all([
     listRunProgress(db, shop.orderTiming, rows),
+    listPaymentProblems(db, shop.id),
     db.event.findMany({
       where: { shopId: shop.id, type: MIXED_PLANS_EVENT },
       orderBy: { createdAt: "desc" },
@@ -90,6 +94,21 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     nextBefore,
     runs,
     timezone,
+    paymentProblems: problems.rows.map((row) => {
+      const [last] = row.billingAttempts;
+      return {
+        id: row.id,
+        plan: row.plan.name,
+        customerId: row.customerGid.split("/").pop(),
+        chargeback: row.pausedReason === "CHARGEBACK",
+        paused: row.status === "PAUSED",
+        // Shopify's code, in lower case: it's specific, and there are too many to word by hand.
+        error: last?.errorCode?.replaceAll("_", " ").toLowerCase() ?? null,
+        tries: last?.attempt ?? 0,
+        nextTry: last?.nextRetryAt && formatZoned(last.nextRetryAt, timezone),
+      };
+    }),
+    morePaymentProblems: problems.more,
     mixed: mixed.map(({ id, payload }) => {
       const { orderGid, orderName } = payload as {
         orderGid?: string;
@@ -163,6 +182,26 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     return {
       ok: count === 1,
       message: count === 1 ? "Marked as handled." : "That sign-up was already handled.",
+    } satisfies ActionData;
+  }
+
+  if (intent === "retryCharge") {
+    const subscriptionId = String(form.get("subscriptionId"));
+    const owned = await db.subscription.count({
+      where: { id: subscriptionId, shopId: shop.id },
+    });
+    if (owned === 0) {
+      return {
+        ok: false,
+        message: "That subscriber no longer exists.",
+      } satisfies ActionData;
+    }
+    await enqueueJobs(env, [
+      resumeJob(session.shop, subscriptionId, crypto.randomUUID(), true),
+    ]);
+    return {
+      ok: true,
+      message: "Done. It takes a moment to show here.",
     } satisfies ActionData;
   }
 
@@ -270,8 +309,18 @@ function DateAndHour({
 }
 
 export default function Releases() {
-  const { word, plural, releases, nextBefore, createKey, runs, timezone, mixed } =
-    useLoaderData<typeof loader>();
+  const {
+    word,
+    plural,
+    releases,
+    nextBefore,
+    createKey,
+    runs,
+    timezone,
+    mixed,
+    paymentProblems,
+    morePaymentProblems,
+  } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<ActionData>();
   const { revalidate } = useRevalidator();
   const shopify = useAppBridge();
@@ -395,6 +444,64 @@ export default function Releases() {
           </s-stack>
         </s-banner>
       )}
+      {paymentProblems.length > 0 && (
+        <s-section heading="Payment problems">
+          <s-stack gap="base">
+            <s-paragraph>
+              Once paid, the {word} that failed ships late. On a bundle, so does
+              each {word} due meanwhile, as far as the renewal covers. On pay per{" "}
+              {word}, those are skipped. Paid {plural} still ship, unless
+              there&apos;s a chargeback.
+            </s-paragraph>
+            {paymentProblems.map((problem) => (
+              <s-stack
+                key={problem.id}
+                direction="inline"
+                gap="base"
+                alignItems="center"
+              >
+                <s-link href={`shopify://admin/customers/${problem.customerId}`}>
+                  Customer {problem.customerId}
+                </s-link>
+                <s-text>{problem.plan}</s-text>
+                {problem.chargeback ? (
+                  <s-badge tone="critical">Chargeback</s-badge>
+                ) : problem.paused ? (
+                  <s-badge tone="critical">Paused</s-badge>
+                ) : (
+                  <s-badge tone="warning">Retrying</s-badge>
+                )}
+                {problem.error && (
+                  <s-text color="subdued">
+                    {problem.error}, after {problem.tries}{" "}
+                    {problem.tries === 1 ? "try" : "tries"}
+                  </s-text>
+                )}
+                {problem.nextTry && (
+                  <s-text color="subdued">Next try {problem.nextTry}</s-text>
+                )}
+                <s-button
+                  {...(busy ? { disabled: true } : {})}
+                  onClick={() =>
+                    fetcher.submit(
+                      { intent: "retryCharge", subscriptionId: problem.id },
+                      { method: "POST" },
+                    )
+                  }
+                >
+                  {problem.chargeback ? "End the hold" : "Retry charge"}
+                </s-button>
+              </s-stack>
+            ))}
+            {morePaymentProblems && (
+              <s-text color="subdued">
+                More subscribers have payment problems. They appear here as these
+                are resolved.
+              </s-text>
+            )}
+          </s-stack>
+        </s-section>
+      )}
       <s-section heading={`New ${word}`}>
         {/* Keyed on the token, so the form clears when a new one arrives. */}
         <fetcher.Form method="post" key={createKey}>
@@ -482,8 +589,15 @@ export default function Releases() {
                           {runs[release.id].ordered} of{" "}
                           {runs[release.id].ordered +
                             runs[release.id].waiting +
-                            runs[release.id].refused}{" "}
+                            runs[release.id].refused +
+                            runs[release.id].held}{" "}
                           orders created.
+                        </s-text>
+                      )}
+                      {runs[release.id]?.held > 0 && (
+                        <s-text color="subdued">
+                          {runs[release.id].held} held: waiting for payment. They
+                          ship late once paid.
                         </s-text>
                       )}
                       {runs[release.id]?.waiting > 0 && !release.productGid && (

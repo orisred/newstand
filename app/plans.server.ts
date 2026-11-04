@@ -19,6 +19,11 @@ const PRODUCT_GID = /^gid:\/\/shopify\/Product\/\d{1,20}$/;
 
 export const SYNC_JOB = "plan.sync";
 
+export const PRICE_POLICIES = ["KEEP_OLD_PRICE", "APPLY_AT_RENEWAL"] as const;
+export type PricePolicy = (typeof PRICE_POLICIES)[number];
+/** Time for the notice (Step 10). A renewal before this keeps the old price. */
+const PRICE_NOTICE_DAYS = 30;
+
 export type PlanInput = {
   name: string;
   displayName: string;
@@ -130,6 +135,16 @@ export function parsePlan(
     oneOf(RENEWAL_RULES, text(form, "renewalRule")) ??
     (billingMode === "PREPAID_BUNDLE" ? null : RENEWAL_RULES[0]);
   if (!renewalRule) errors.renewalRule = "Choose when the bundle renews.";
+  // A bundle of one that ships at once would run out, and charge again, right after sign-up.
+  if (
+    billingMode === "PREPAID_BUNDLE" &&
+    renewalRule === "ON_DEPLETION" &&
+    releasesPerTerm < 2 &&
+    !errors.releasesPerTerm
+  ) {
+    errors.renewalRule =
+      "A bundle of one can't renew when it runs out. Choose another renewal, or a pay-per-release plan.";
+  }
   const startRule = oneOf(START_RULES, text(form, "startRule"));
   if (!startRule)
     errors.startRule = "Choose which release new subscribers start on.";
@@ -237,16 +252,24 @@ export async function createPlan(
  * subscribers bought; `parsePlan` keeps them from `existing`. The edit marks the plan not
  * synced.
  *
- * PRICE: today a new price applies to new sign-ups only, because Shopify keeps each
- * contract's own price. Step 9 owns the price-change policy (keep the old price or apply
- * it at renewal, with notice): it belongs here, where `priceCents` changes.
+ * A new price always applies to new sign-ups. For existing subscribers the merchant decides each
+ * time, and that decision is recorded here: `KEEP_OLD_PRICE` leaves their contracts alone, and
+ * `APPLY_AT_RENEWAL` changes each contract just before its next charge once the notice period is
+ * over (see `applyPriceChange`). The latest change is the only one that counts, so a merchant can
+ * take one back. The plan is saved first: a crash between the two leaves the safe outcome.
  */
 export async function updatePlan(
   db: Db,
   shopId: string,
   id: string,
   input: PlanInput,
+  pricePolicy: PricePolicy = "KEEP_OLD_PRICE",
+  now = new Date(),
 ) {
+  const before = await db.plan.findFirst({
+    where: { id, shopId },
+    select: { priceCents: true },
+  });
   const { count } = await db.plan.updateMany({
     where: { id, shopId },
     data: {
@@ -263,6 +286,20 @@ export async function updatePlan(
       syncRevision: { increment: 1 },
     },
   });
+  if (count === 1 && before && before.priceCents !== input.priceCents) {
+    await db.priceChange.create({
+      data: {
+        planId: id,
+        newPriceCents: input.priceCents,
+        policy: pricePolicy,
+        effectiveAt:
+          pricePolicy === "APPLY_AT_RENEWAL"
+            ? new Date(now.getTime() + PRICE_NOTICE_DAYS * 24 * 60 * 60 * 1000)
+            : now,
+      },
+      select: { id: true },
+    });
+  }
   return count === 1;
 }
 

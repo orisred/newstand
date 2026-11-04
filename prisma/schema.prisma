@@ -158,13 +158,14 @@ model Subscription {
   source             SubscriptionSource @default(NEW)
   quantity           Int                @default(1) // copies of each release; the contract bills for them all
   releasesRemaining  Int                // paid releases whose order hasn't been created. See DECISIONS.md
-  firstReleaseNumber Int                @default(1) // the lowest-numbered release this subscriber can receive
+  firstReleaseNumber Int                @default(1) // the lowest-numbered release this subscriber can receive; a renewal at 0 moves it on
   termEndsAt         DateTime?          // bundle renewal date before any late-release hold
   nextReleaseId      String?            // unused: a PENDING Delivery says what's next
   lockedPriceCents   Int?
   giftBuyerGid       String?
   giftMessage        String?
-  pausedReason       String?
+  pausedReason       String?            // FAILED_PAYMENT or CHARGEBACK
+  paymentProblemSince DateTime?         // from the first failed try or chargeback until it's resolved. See "Reach-back" in DECISIONS.md
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
   deliveries         Delivery[]
@@ -172,13 +173,14 @@ model Subscription {
   events             Event[]
 
   @@index([shopId, status])
+  @@index([shopId, paymentProblemSince])
   @@index([customerGid])
 }
 
 enum DeliveryStatus {
   PENDING      // assigned, order not yet created
   ORDERED      // $0 order created at cutoff
-  HELD         // subscription paused at cutoff; ships late once paid
+  HELD         // the release a failed charge was for, or a bundle's while a payment fails, or any under a chargeback
   FULFILLED
   CANCELLED
 }
@@ -212,14 +214,21 @@ model BillingAttempt {
   id               String        @id @default(cuid())
   subscriptionId   String
   subscription     Subscription  @relation(fields: [subscriptionId], references: [id])
-  idempotencyKey   String        @unique // subscriptionId:releaseId:attempt
+  chargeFor        String        // the release ID, or term-<ms> for a bundle renewal. See DECISIONS.md
+  idempotencyKey   String        @unique // subscriptionId:chargeFor:attempt
   attempt          Int
   shopifyAttemptGid String?      @unique
+  orderGid         String?       // the billing order, once it has succeeded
   result           BillingResult @default(PENDING)
   errorCode        String?
   nextRetryAt      DateTime?
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
+
+  @@index([subscriptionId, chargeFor])
+  @@index([chargeFor, result])
+  @@index([result, createdAt])
+  @@index([nextRetryAt])
 }
 
 enum PriceChangePolicy {

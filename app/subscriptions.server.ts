@@ -17,6 +17,42 @@ export const PAYMENT_ORDER_JOB = "payment_order.fulfill";
 export const RELEASE_RUN_JOB = "release.run";
 export const RELEASE_FIRE_JOB = "release.fire";
 
+/**
+ * A closed contract. Paid releases still ship, and a chargeback stays flagged, but nothing is
+ * charged again, so what's held or waiting for a payment is closed too. Safe to repeat.
+ */
+export async function markCancelled(
+  rawDb: D1Database,
+  subscriptionId: string,
+  now: Date,
+) {
+  const stamp = now.toISOString();
+  await rawDb.batch([
+    rawDb
+      .prepare(
+        `UPDATE "Delivery" SET "status" = 'CANCELLED', "updatedAt" = ?2
+         WHERE "subscriptionId" = ?1 AND ("status" = 'HELD' OR ("status" = 'PENDING' AND EXISTS (
+           SELECT 1 FROM "Subscription" WHERE "id" = ?1 AND "releasesRemaining" <= 0)))`,
+      )
+      .bind(subscriptionId, stamp),
+    rawDb
+      .prepare(
+        `UPDATE "BillingAttempt" SET "nextRetryAt" = NULL, "updatedAt" = ?2
+         WHERE "subscriptionId" = ?1 AND "nextRetryAt" IS NOT NULL`,
+      )
+      .bind(subscriptionId, stamp),
+    rawDb
+      .prepare(
+        `UPDATE "Subscription" SET "status" = 'CANCELLED',
+           "pausedReason" = CASE WHEN "pausedReason" = 'CHARGEBACK' THEN "pausedReason" END,
+           "paymentProblemSince" = CASE WHEN "pausedReason" = 'CHARGEBACK' THEN "paymentProblemSince" END,
+           "updatedAt" = ?2
+         WHERE "id" = ?1 AND "status" <> 'ENDED'`,
+      )
+      .bind(subscriptionId, stamp),
+  ]);
+}
+
 /** Flags a paid contract holding several plans. Becomes `MIXED_HANDLED` when the merchant has dealt with it. */
 export const MIXED_PLANS_EVENT = "contract.mixed_plans";
 export const MIXED_HANDLED_EVENT = "contract.mixed_plans.handled";
@@ -131,7 +167,7 @@ function statusFor(
   contractStatus: string,
   current: string | null,
 ): "ACTIVE" | "CANCELLED" | null {
-  // Step 9 owns pausing, and an ended or redacted subscription stays that way.
+  // Billing owns pausing, and an ended or redacted subscription stays that way.
   if (current === "ENDED") return null;
   if (contractStatus === "CANCELLED" || contractStatus === "EXPIRED") {
     return current === "CANCELLED" ? null : "CANCELLED";
@@ -341,7 +377,9 @@ export async function syncContract(
     });
   } else {
     const status = statusFor(contract.status, subscription.status);
-    if (status) {
+    if (status === "CANCELLED") {
+      await markCancelled(rawDb, subscription.id, now);
+    } else if (status) {
       await db.subscription.updateMany({
         where: { id: subscription.id, status: subscription.status },
         data: { status },

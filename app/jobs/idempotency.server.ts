@@ -30,10 +30,10 @@ interface ClaimableJob {
  */
 export function billingAttemptKey(
   subscriptionId: string,
-  releaseId: string,
+  chargeFor: string, // the release ID, or term-<ms> for a bundle renewal, which has no release
   attempt: number,
 ) {
-  return `${subscriptionId}:${releaseId}:${attempt}`;
+  return `${subscriptionId}:${chargeFor}:${attempt}`;
 }
 
 export async function claimJob(db: D1Database, job: ClaimableJob): Promise<Claim> {

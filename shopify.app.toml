@@ -21,12 +21,20 @@ api_version = "2026-10"
   uri = "/webhooks/subscription_contracts"
 
   [[webhooks.subscriptions]]
+  topics = [ "subscription_billing_attempts/success", "subscription_billing_attempts/failure", "subscription_billing_attempts/challenged" ]
+  uri = "/webhooks/subscription_billing_attempts"
+
+  [[webhooks.subscriptions]]
+  topics = [ "disputes/create" ]
+  uri = "/webhooks/disputes"
+
+  [[webhooks.subscriptions]]
   compliance_topics = [ "customers/data_request", "customers/redact", "shop/redact" ]
   uri = "/webhooks/compliance"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "write_products,read_customers,write_customers,read_customer_payment_methods,write_own_subscription_contracts,write_orders,write_merchant_managed_fulfillment_orders,write_validations"
+scopes = "write_products,read_customers,write_customers,read_customer_payment_methods,write_own_subscription_contracts,write_orders,write_merchant_managed_fulfillment_orders,write_validations,read_shopify_payments_disputes"
 optional_scopes = [ ]
 use_legacy_install_flow = false
 

@@ -167,6 +167,7 @@ describe("redactShop", () => {
     await db().billingAttempt.create({
       data: {
         subscriptionId: subscription.id,
+        chargeFor: "release",
         idempotencyKey: `key-${++n}`,
         attempt: 1,
       },
