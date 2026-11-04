@@ -41,6 +41,9 @@ export async function recordDataRequest(
       giftMessage: true,
       createdAt: true,
       plan: { select: { displayName: true } },
+      billingAttempts: {
+        select: { attempt: true, result: true, errorCode: true, orderGid: true, createdAt: true },
+      },
       deliveries: {
         select: {
           orderGid: true,
@@ -106,6 +109,12 @@ export async function redactCustomer(
       .bind(shop.id, customerGid, stamp),
     rawDb
       .prepare(
+        `UPDATE "BillingAttempt" SET "nextRetryAt" = NULL, "updatedAt" = ?3
+         WHERE "subscriptionId" IN (${held})`,
+      )
+      .bind(shop.id, customerGid, stamp),
+    rawDb
+      .prepare(
         `UPDATE "Subscription" SET "giftBuyerGid" = NULL, "giftMessage" = NULL, "updatedAt" = ?3
          WHERE "shopId" = ?1 AND "giftBuyerGid" = ?2`,
       )
@@ -113,7 +122,7 @@ export async function redactCustomer(
     rawDb
       .prepare(
         `UPDATE "Subscription" SET "customerGid" = 'redacted', "giftMessage" = NULL,
-           "pausedReason" = NULL, "status" = 'ENDED', "updatedAt" = ?3
+           "pausedReason" = NULL, "paymentProblemSince" = NULL, "status" = 'ENDED', "updatedAt" = ?3
          WHERE "shopId" = ?1 AND "customerGid" = ?2`,
       )
       .bind(shop.id, customerGid, stamp),

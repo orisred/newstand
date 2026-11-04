@@ -3,10 +3,14 @@ import { applyD1Migrations, env } from "cloudflare:test";
 import { Session } from "@shopify/shopify-api";
 import type { ActionFunctionArgs } from "react-router";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { createDb } from "../app/db.server";
+import { dueWorkFinders } from "../app/jobs/registry.server";
 import { action as scopesUpdate } from "../app/routes/webhooks.app.scopes_update";
 import { action as uninstalled } from "../app/routes/webhooks.app.uninstalled";
 import { D1SessionStorage } from "../app/session-storage.server";
+import { getOrCreateShop } from "../app/shop.server";
 import { unauthenticated } from "../app/shopify.server";
+import { RECONCILE_JOB } from "../app/subscriptions.server";
 
 beforeAll(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
@@ -207,6 +211,77 @@ describe("a background job through the Shopify library", () => {
     await expect(unauthenticated.admin(newShop())).rejects.toThrow(
       "Could not find a session",
     );
+  });
+});
+
+describe("keeping an idle shop's token alive", () => {
+  const DAY = 24 * HOUR;
+  const db = () => createDb(env.DB);
+
+  /** A shop nobody has touched for `idleDays`, with its 90-day refresh token running out. */
+  async function idleShop(idleDays: number) {
+    const shop = newShop();
+    await getOrCreateShop(db(), shop);
+    const session = offlineSession(shop, -idleDays * DAY);
+    session.refreshTokenExpires = new Date(Date.now() + (90 - idleDays) * DAY);
+    await storage().storeSession(session);
+    return shop;
+  }
+
+  /** What the tick queues for this shop. Its job starts with `unauthenticated.admin`, which is the keep-alive. */
+  const hourlyJob = async (shop: string) =>
+    (
+      await Promise.all(
+        dueWorkFinders.map((find) =>
+          find({ env, db: db(), now: new Date() }),
+        ),
+      )
+    )
+      .flat()
+      .find((job) => job.type === RECONCILE_JOB && job.shop === shop);
+
+  const stored = async (shop: string) =>
+    (await storage().findSessionsByShop(shop))[0];
+
+  it("a shop idle for 80 days gets its token refreshed by the hourly contract check", async () => {
+    const shop = await idleShop(80);
+    const fetchStub = stubFetch();
+    expect(await hourlyJob(shop)).toBeDefined();
+
+    await unauthenticated.admin(shop);
+
+    expect(fetchStub).toHaveBeenCalledTimes(1);
+    const session = await stored(shop);
+    expect(session.accessToken).toBe("new-access");
+    expect(session.refreshToken).toBe("new-refresh");
+    // The 90 days start again, so an idle shop never gets near the end of them.
+    expect(session.refreshTokenExpires!.getTime()).toBeGreaterThan(
+      Date.now() + 89 * DAY,
+    );
+  });
+
+  it("a dead token fails visibly and loses nothing, and recovers when the merchant opens the app", async () => {
+    const shop = await idleShop(95);
+    stubFetch(() => new Response("{}", { status: 401 }));
+    const logged = vi.spyOn(console, "error");
+
+    await expect(unauthenticated.admin(shop)).rejects.toThrow(
+      "Could not find a session",
+    );
+    expect(
+      logged.mock.calls.some(([line]) =>
+        String(line).includes("session.refresh_rejected"),
+      ),
+    ).toBe(true);
+
+    // The session stays, so the tick keeps trying each hour under a new job ID.
+    expect((await stored(shop)).refreshToken).toBe("old-refresh");
+    expect(await hourlyJob(shop)).toBeDefined();
+
+    // An admin page load gets a new token by exchange, and the next job works.
+    await storage().storeSession(offlineSession(shop, HOUR, "exchanged"));
+    const { session } = await unauthenticated.admin(shop);
+    expect(session.accessToken).toBe("exchanged-access");
   });
 });
 

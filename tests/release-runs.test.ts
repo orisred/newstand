@@ -908,6 +908,7 @@ describe("refusals", () => {
         ordered: 0,
         waiting: 0,
         refused: 1,
+        held: 0,
         error: "Customer is disabled",
       },
     });
@@ -958,7 +959,7 @@ describe("no product", () => {
         { id: release.id, status: "READY" },
       ]),
     ).toEqual({
-      [release.id]: { ordered: 0, waiting: 2, refused: 0, error: null },
+      [release.id]: { ordered: 0, waiting: 2, refused: 0, held: 0, error: null },
     });
 
     await setReleaseProduct(
@@ -1610,7 +1611,7 @@ describe("listRunProgress", () => {
         { id: early.id, status: "PREORDER" },
       ]),
     ).toEqual({
-      [release.id]: { ordered: 1, waiting: 1, refused: 1, error: "No" },
+      [release.id]: { ordered: 1, waiting: 1, refused: 1, held: 0, error: "No" },
     });
   });
 });

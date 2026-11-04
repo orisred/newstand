@@ -1,3 +1,4 @@
+import { chargeRelease, renewIfDue } from "./billing.server";
 import type { createDb } from "./db.server";
 import type { DueWorkFinder, Job } from "./jobs/runner.server";
 import { describeError, logEvent } from "./logger.server";
@@ -27,24 +28,46 @@ const THROTTLE_WAIT_SECONDS = 60;
 const MAX_THROTTLE_WAIT_SECONDS = 900;
 // What's left after a full pass is busy or failed. Longer than an order's 5-minute lease.
 const PASS_WAIT_SECONDS = 360;
+// Charges just sent answer in seconds, by webhook, and that webhook starts a slice of its own.
+const CHARGE_WAIT_SECONDS = 30;
 const MAX_PASSES = 3;
 
 /**
- * Who a release is due to. Everything a run assigns goes through this, so Step 9 extends it
- * here to take in per-release subscribers, who sit at 0 until they're charged.
+ * Who a release is due to. Everything a run assigns goes through this.
  *
  * `releasesRemaining` counts paid releases with no order yet, and each PENDING Delivery has
- * a claim on one of them. So a subscriber joins a run only with a paid release left over:
- * PENDING Deliveries never outnumber `releasesRemaining`, and two runs can't spend one.
- * PAUSED is in: this only ever spends releases already paid for.
+ * a claim on one of them. So a subscriber normally joins a run only with a paid release left
+ * over: `PAID_LEFT`, which spends what's paid for whatever the status, PAUSED and CANCELLED too.
+ *
+ * `CHARGE_DUE` is the other way in: a pay-per-release subscriber at 0, charged by the run. One
+ * PENDING at a time, so a charge is only ever spent on the release it was for.
+ *
+ * While a payment is failing, a bundle's release is HELD and ships late once paid. A pay-per-release
+ * subscriber gets nothing: what comes out meanwhile is skipped for good (decided by N, 2026-11-04).
+ * A chargeback holds releases even if paid. Whatever else is at 0 sits this one out, and moving
+ * `firstReleaseNumber` past it, at a renewal or when a payment problem ends, is what keeps it out
+ * however long it stays open.
  */
-const DUE_SUBSCRIPTION = `s."status" <> 'ENDED'
-  AND s."contractGid" IS NOT NULL
-  AND s."firstReleaseNumber" <= r."number"
-  AND s."releasesRemaining" > (
+const PAID_LEFT = `s."releasesRemaining" > (
     SELECT COUNT(*) FROM "Delivery" d
     WHERE d."subscriptionId" = s."id" AND d."status" = 'PENDING'
   )`;
+const CHARGE_DUE = `p."billingMode" = 'PER_RELEASE' AND p."autoRenew" = 1
+  AND s."status" = 'ACTIVE' AND s."source" <> 'GIFT'
+  AND s."paymentProblemSince" IS NULL AND s."releasesRemaining" = 0
+  AND NOT EXISTS (
+    SELECT 1 FROM "Delivery" d
+    WHERE d."subscriptionId" = s."id" AND d."status" = 'PENDING'
+  )`;
+const CHARGEBACK_HOLD = `COALESCE(s."pausedReason", '') = 'CHARGEBACK'`;
+const SHIPPABLE = `NOT ${CHARGEBACK_HOLD} AND ((${PAID_LEFT}) OR (${CHARGE_DUE}))`;
+const DUE_SUBSCRIPTION = `s."status" <> 'ENDED'
+  AND s."contractGid" IS NOT NULL
+  AND s."firstReleaseNumber" <= r."number"
+  AND ((${SHIPPABLE})
+    OR ${CHARGEBACK_HOLD}
+    OR (p."billingMode" = 'PREPAID_BUNDLE' AND s."paymentProblemSince" IS NOT NULL
+      AND s."status" IN ('ACTIVE', 'PAUSED')))`;
 
 /**
  * Gives every due subscriber a Delivery on this release. One statement, so it's atomic and
@@ -59,11 +82,13 @@ export async function createDueDeliveries(
 ) {
   const { meta } = await rawDb
     .prepare(
-      `INSERT INTO "Delivery" ("id", "subscriptionId", "releaseId", "updatedAt")
-       SELECT lower(hex(randomblob(16))), s."id", r."id", ?3
+      `INSERT INTO "Delivery" ("id", "subscriptionId", "releaseId", "status", "updatedAt")
+       SELECT lower(hex(randomblob(16))), s."id", r."id",
+         CASE WHEN ${SHIPPABLE} THEN 'PENDING' ELSE 'HELD' END, ?3
        FROM "Release" r
        JOIN "Shop" sh ON sh."id" = r."shopId"
        JOIN "Subscription" s ON s."shopId" = r."shopId"
+       JOIN "Plan" p ON p."id" = s."planId"
        WHERE r."id" = ?1 AND r."shopId" = ?2
          AND (r."status" = 'READY'
            OR (r."status" = 'PREORDER' AND sh."orderTiming" = 'PREORDER_OPENS'))
@@ -190,7 +215,10 @@ export async function runReleaseSlice(
           id,
           clock(),
         );
-        if (result === "created" || result === "recovered") created++;
+        if (result === "created" || result === "recovered") {
+          created++;
+          await renewAfterOrder(db, rawDb, graphql!, id, clock());
+        }
       } catch (error) {
         if (error instanceof OrderThrottled) {
           // Only rounds that got nothing through count towards a longer wait.
@@ -228,9 +256,25 @@ export async function runReleaseSlice(
     if (page.length === ORDERS_PER_SLICE) {
       return await next(0, { after, passes });
     }
-    const left = await db.delivery.count({ where: runnable });
+    // Charges follow the orders, and only as many as the run can order now, so a slow store never
+    // has a charge waiting hours for its order. The webhook's slice makes the order.
+    const paid = await db.delivery.count({ where: runnable });
+    const charges = await chargeRelease(
+      db,
+      rawDb,
+      graphqlFor,
+      releaseId,
+      ORDERS_PER_SLICE - paid,
+      clock(),
+    );
+    const left = paid + charges.waiting;
+    if (charges.sent > 0) {
+      return await next(CHARGE_WAIT_SECONDS, { passes: 0 });
+    }
     if (left > 0 && passes < MAX_PASSES) {
-      return await next(PASS_WAIT_SECONDS, { passes: passes + 1 });
+      return await next(charges.waiting > 0 ? CHARGE_WAIT_SECONDS : PASS_WAIT_SECONDS, {
+        passes: passes + 1,
+      });
     }
     if (left > 0)
       logEvent("warn", "release_run.left_for_tick", { releaseId, left });
@@ -240,6 +284,30 @@ export async function runReleaseSlice(
     await settle().catch(() => {});
     throw error;
   }
+}
+
+/**
+ * An order just took a bundle's last paid release, which is the moment a held renewal is charged.
+ * A failure here is no failure of the order, and the tick finds the renewal anyway.
+ */
+export async function renewAfterOrder(
+  db: Db,
+  rawDb: D1Database,
+  graphql: Graphql,
+  deliveryId: string,
+  now: Date,
+) {
+  const delivery = await db.delivery.findUnique({
+    where: { id: deliveryId },
+    select: { subscriptionId: true },
+  });
+  if (!delivery) return;
+  await renewIfDue(db, rawDb, graphql, delivery.subscriptionId, now).catch((error) =>
+    logEvent("error", "billing.renew_failed", {
+      subscriptionId: delivery.subscriptionId,
+      ...describeError(error),
+    }),
+  );
 }
 
 /**

@@ -17,6 +17,8 @@ export const PAGE_SIZE = 25;
 
 export const TITLE_MAX_LENGTH = 120;
 
+const PAYMENT_PROBLEMS = 20;
+
 export function parseTitle(raw: FormDataEntryValue | null) {
   const title = typeof raw === "string" ? raw.trim() : "";
   if (!title || title.length > TITLE_MAX_LENGTH || /\p{C}/u.test(title)) {
@@ -121,29 +123,62 @@ export async function listRunProgress(
   const rows = await db.delivery.groupBy({
     by: ["releaseId", "status", "orderError"],
     where: {
-      status: { in: ["PENDING", "ORDERED", "FULFILLED"] },
+      status: { in: ["PENDING", "HELD", "ORDERED", "FULFILLED"] },
       releaseId: { in: due.map(({ id }) => id) },
     },
     _count: true,
   });
   const progress: Record<
     string,
-    { ordered: number; waiting: number; refused: number; error: string | null }
+    {
+      ordered: number;
+      waiting: number;
+      refused: number;
+      held: number;
+      error: string | null;
+    }
   > = {};
   for (const row of rows) {
     const entry = (progress[row.releaseId] ??= {
       ordered: 0,
       waiting: 0,
       refused: 0,
+      held: 0,
       error: null,
     });
-    if (row.status !== "PENDING") entry.ordered += row._count;
+    if (row.status === "HELD") entry.held += row._count;
+    else if (row.status !== "PENDING") entry.ordered += row._count;
     else if (row.orderError) {
       entry.refused += row._count;
       entry.error ??= row.orderError;
     } else entry.waiting += row._count;
   }
   return progress;
+}
+
+/**
+ * Who has a payment problem, in one query, for the releases screen. A full subscriber screen is
+ * Step 13, so this stops at a page and says if there are more.
+ */
+export async function listPaymentProblems(db: Db, shopId: string) {
+  const rows = await db.subscription.findMany({
+    where: { shopId, paymentProblemSince: { not: null } },
+    orderBy: { paymentProblemSince: "asc" },
+    take: PAYMENT_PROBLEMS + 1,
+    select: {
+      id: true,
+      customerGid: true,
+      status: true,
+      pausedReason: true,
+      plan: { select: { name: true } },
+      billingAttempts: {
+        orderBy: { createdAt: "desc" },
+        take: 1,
+        select: { errorCode: true, nextRetryAt: true, attempt: true },
+      },
+    },
+  });
+  return { rows: rows.slice(0, PAYMENT_PROBLEMS), more: rows.length > PAYMENT_PROBLEMS };
 }
 
 const VARIANT_GID = /^gid:\/\/shopify\/ProductVariant\/\d+$/;
@@ -199,7 +234,7 @@ const NO_ORDERS = `NOT EXISTS (SELECT 1 FROM "Delivery" d WHERE d."releaseId" = 
 
 /**
  * Cancelling refuses a release with orders, which have used up paid releases, and takes its
- * PENDING Deliveries with it, in one batch, so those subscribers stay paid for the next release.
+ * PENDING and HELD Deliveries with it, in one batch, so those subscribers stay paid for the next release.
  * `createDeliveryOrder` only takes a lease on a PENDING Delivery, so a cancel racing a run has
  * one winner: if the lease came first this refuses, and if this came first the lease fails.
  */
@@ -221,7 +256,7 @@ async function cancelWithDeliveries(
     rawDb
       .prepare(
         `UPDATE "Delivery" SET "status" = 'CANCELLED', "updatedAt" = ?3
-         WHERE "releaseId" = ?1 AND "status" = 'PENDING' AND EXISTS (
+         WHERE "releaseId" = ?1 AND "status" IN ('PENDING', 'HELD') AND EXISTS (
            SELECT 1 FROM "Release" WHERE "id" = ?1 AND "shopId" = ?2 AND "status" = 'CANCELLED')`,
       )
       .bind(releaseId, shopId, stamp),

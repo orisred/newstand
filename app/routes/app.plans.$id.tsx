@@ -12,8 +12,10 @@ import {
   createPlan,
   getPlan,
   parsePlan,
+  PRICE_POLICIES,
   requestSync,
   updatePlan,
+  type PricePolicy,
   type PlanErrors,
 } from "../plans.server";
 import { MAX_RELEASES_PER_TERM, MAX_TERM_MONTHS } from "../plan-options";
@@ -104,7 +106,16 @@ export const action = async ({
         : "That plan was already created.",
     } satisfies ActionData;
   }
-  await updatePlan(db, shop.id, existing!.id, parsed.values);
+  const policy = String(form.get("pricePolicy"));
+  await updatePlan(
+    db,
+    shop.id,
+    existing!.id,
+    parsed.values,
+    PRICE_POLICIES.includes(policy as PricePolicy)
+      ? (policy as PricePolicy)
+      : undefined,
+  );
   await requestSync(env, db, shopRef, existing!.id);
   return {
     ok: true,
@@ -181,6 +192,22 @@ export default function PlanForm() {
                 value={plan ? (plan.priceCents / 100).toFixed(2) : ""}
                 error={errors.price}
               />
+              {plan && (
+                <s-select
+                  label="If you change the price"
+                  name="pricePolicy"
+                  value="KEEP_OLD_PRICE"
+                  details="New subscribers always pay the new price. You decide this each time you change it."
+                >
+                  <s-option value="KEEP_OLD_PRICE">
+                    Existing subscribers keep the price they have
+                  </s-option>
+                  <s-option value="APPLY_AT_RENEWAL">
+                    Existing subscribers pay it from their next charge, at
+                    least 30 days from now, with notice
+                  </s-option>
+                </s-select>
+              )}
             </s-stack>
           </s-section>
 

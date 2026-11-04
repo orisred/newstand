@@ -66,7 +66,8 @@ Prisma models are in `prisma/schema.prisma`.
 | Last paid release is late past the renewal date | Renewal is held and charged when that release's order is created; subscriber gets a notice |
 | Release cancelled | Doesn't count against paid releases |
 | Extra release before a bundle's renewal date | Not included; renewal stays on the term date and the new term starts with the next release. A bundle buys N releases, not every release in 12 months |
-| Renewal card still failing when orders are created | Subscription pauses; that release ships late once paid |
+| Renewal card still failing when orders are created | Bundle: subscription pauses; that release ships late once paid |
+| Per-release charge fails | That release ships late once paid, for one charge. Releases that come out while the problem lasts get no charge and are skipped for good; the next one is normal |
 | Address change after a release's orders exist | Applies from the next release; the portal says so |
 | Address outside the US | Blocked at checkout and in the portal |
 | Cancellation mid-term | Auto-renew off; remaining paid releases still ship |
@@ -74,8 +75,8 @@ Prisma models are in `prisma/schema.prisma`.
 | Gift ends | Recipient offered a subscription; buyer never charged again |
 | Gift to an existing subscriber | Second subscription (two copies) |
 | Same customer subscribes twice | Two subscriptions, two copies |
-| Price increase | Merchant chooses per change: keep old price or apply at next renewal with notice |
-| Chargeback on a renewal | Pause and flag |
+| Price increase | Merchant chooses per change: keep old price or apply at next renewal, at least 30 days on, with notice |
+| Chargeback on a renewal | Pause and flag; paid releases are held too, until the merchant ends it |
 | GDPR redact | Erase personal data; order history stays in Shopify |
 
 ## Migration from Conjured

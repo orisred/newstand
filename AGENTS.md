@@ -18,7 +18,7 @@ Read `docs/PLAN.md` and `docs/DECISIONS.md` before changing behavior. Decisions 
 
 - Never rely on Shopify's delivery schedule for release orders. The worker creates each release's $0 order itself when the shop's `orderTiming` step happens, using the address on the contract at that moment.
 - Money moves only through Shopify billing attempts (`subscriptionBillingAttemptCreate`). Never charge cards any other way.
-- Every billing attempt must be idempotent: use an idempotency key of `subscriptionId:releaseId:attempt`.
+- Every billing attempt must be idempotent: use an idempotency key of `subscriptionId:releaseId:attempt`. A bundle renewal has no release, so it uses `term-<ms>` in that place (see "Renewals and charges" in `docs/DECISIONS.md`).
 - Runtime is Cloudflare Workers, not Node. Do not use Node-only APIs (`fs`, `net`, Node streams); use Web APIs.
 - Background work: the Worker's `scheduled` handler (hourly Cron Trigger) finds due work and enqueues it on Cloudflare Queues; the `queue` handler does it. Merchant actions (announce pre-order, ready to ship) enqueue directly. Never do long work inside a request.
 - D1 has no interactive transactions. Make every write idempotent with unique keys and use `batch` for multi-row writes.

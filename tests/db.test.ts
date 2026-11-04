@@ -66,6 +66,7 @@ describe("first D1 migration through Prisma", () => {
     });
     const attempt = {
       subscriptionId: subscription.id,
+      chargeFor: "release",
       idempotencyKey: `${subscription.id}:release:1`,
       attempt: 1,
     };

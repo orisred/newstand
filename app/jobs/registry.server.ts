@@ -1,3 +1,20 @@
+import {
+  BILLING_RECOVER_JOB,
+  BILLING_RENEW_JOB,
+  BILLING_RESUME_JOB,
+  BILLING_RETRY_JOB,
+  BILLING_SETTLE_JOB,
+  DISPUTE_JOB,
+  findLostResults,
+  findRenewals,
+  findRetries,
+  recordChargeback,
+  recoverAttempt,
+  renewIfDue,
+  retryCharge,
+  retryDue,
+  settleAttempt,
+} from "../billing.server";
 import { ensureCartRule } from "../cart-rule.server";
 import {
   GDPR_JOB,
@@ -12,6 +29,7 @@ import { createDeliveryOrder } from "../release-orders.server";
 import {
   findReleaseRuns,
   findScheduledSteps,
+  renewAfterOrder,
   runReleaseSlice,
 } from "../release-runs.server";
 import { fireScheduledRelease } from "../releases.server";
@@ -36,7 +54,7 @@ async function shopGraphql(shop: string | undefined) {
   return graphqlOf(admin);
 }
 
-// Steps 9 and 10 add their job types and finders here.
+// Step 10 adds its job types and finders here.
 export const jobHandlers: Record<string, JobHandler> = {
   // Brings one plan's selling plan group in line with the plan. Queued by the plan screens.
   [SYNC_JOB]: async (job, { db }) => {
@@ -71,13 +89,12 @@ export const jobHandlers: Record<string, JobHandler> = {
   // Refused orders and a missing product show on the releases screen instead of retrying.
   [DELIVERY_ORDER_JOB]: async (job, { db, env }) => {
     const graphql = await shopGraphql(job.shop);
-    const result = await createDeliveryOrder(
-      db,
-      env.DB,
-      graphql,
-      String(job.data?.deliveryId),
-    );
+    const deliveryId = String(job.data?.deliveryId);
+    const result = await createDeliveryOrder(db, env.DB, graphql, deliveryId);
     logEvent("info", "delivery.order_job", { jobId: job.id, result });
+    if (result === "created" || result === "recovered") {
+      await renewAfterOrder(db, env.DB, graphql, deliveryId, new Date());
+    }
   },
 
   // One slice of a release's run. It ends by enqueueing the next, and never by failing on a limit.
@@ -99,6 +116,53 @@ export const jobHandlers: Record<string, JobHandler> = {
   [PAYMENT_ORDER_JOB]: async (job) => {
     const graphql = await shopGraphql(job.shop);
     await markPaymentOrderFulfilled(graphql, String(job.data?.orderGid));
+  },
+
+  // A billing attempt's result, queued by its webhooks. The job reads it fresh from Shopify.
+  [BILLING_SETTLE_JOB]: async (job, { db, env }) => {
+    const graphql = await shopGraphql(job.shop);
+    await enqueueJobs(
+      env,
+      await settleAttempt(db, env.DB, graphql, String(job.data?.attemptGid)),
+    );
+  },
+
+  [BILLING_RECOVER_JOB]: async (job, { db, env }) => {
+    const graphql = await shopGraphql(job.shop);
+    await enqueueJobs(
+      env,
+      await recoverAttempt(db, env.DB, graphql, String(job.data?.attemptId)),
+    );
+  },
+
+  [BILLING_RENEW_JOB]: async (job, { db, env }) => {
+    const graphql = await shopGraphql(job.shop);
+    await renewIfDue(db, env.DB, graphql, String(job.data?.subscriptionId));
+  },
+
+  [BILLING_RETRY_JOB]: async (job, { db, env }) => {
+    const graphql = await shopGraphql(job.shop);
+    await retryDue(db, env.DB, graphql, String(job.data?.attemptId));
+  },
+
+  // A merchant's press, and in Step 11 a customer's new card.
+  [BILLING_RESUME_JOB]: async (job, { db, env }) => {
+    const graphql = await shopGraphql(job.shop);
+    await enqueueJobs(
+      env,
+      await retryCharge(
+        db,
+        env.DB,
+        graphql,
+        String(job.data?.subscriptionId),
+        job.data?.byMerchant === true,
+      ),
+    );
+  },
+
+  [DISPUTE_JOB]: async (job, { db, env }) => {
+    const graphql = await shopGraphql(job.shop);
+    await recordChargeback(db, env.DB, graphql, String(job.data?.orderGid));
   },
 
   [GDPR_JOB]: async (job, { db, env }) => {
@@ -134,4 +198,7 @@ export const dueWorkFinders: DueWorkFinder[] = [
   findMissedContractWork,
   findScheduledSteps,
   findReleaseRuns,
+  findRenewals,
+  findRetries,
+  findLostResults,
 ];

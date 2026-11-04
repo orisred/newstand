@@ -117,7 +117,8 @@ export class D1SessionStorage {
       }),
     });
     if (response.status === 400 || response.status === 401) {
-      logEvent("warn", "session.refresh_rejected", {
+      // Every job for this shop now fails, until the merchant next opens the app.
+      logEvent("error", "session.refresh_rejected", {
         shop,
         errorStatus: response.status,
       });
