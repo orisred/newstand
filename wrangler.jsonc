@@ -61,16 +61,16 @@
   },
   // Cake Zine's production app (docs/CUTOVER.md, B3), deployed with `npm run deploy:worker:cake-zine`.
   // Its own Worker, D1 and queues, so its data never meets the dev store's. Bindings aren't inherited, so
-  // each is set again here. Never set EMAIL_RECIPIENT_DOMAINS on it. PLACEHOLDER values are filled in
-  // when the app, D1 and sending domain exist: nothing here has been created yet.
+  // each is set again here. Never set EMAIL_RECIPIENT_DOMAINS on it. The sending address stays a
+  // PLACEHOLDER until the sending domain exists (B4).
   "env": {
     "production": {
       "name": "release-subscriptions-cake-zine",
       "workers_dev": true,
       "preview_urls": false,
       "vars": {
-        // PLACEHOLDER: client_id in shopify.app.cake-zine.toml.
-        "SHOPIFY_API_KEY": "PLACEHOLDER_PRODUCTION_CLIENT_ID",
+        // client_id in shopify.app.cake-zine.toml (CZ Subs). Public, so it isn't a secret.
+        "SHOPIFY_API_KEY": "3637783c655703e336cf531f8542198d",
         // Keep in step with application_url in shopify.app.cake-zine.toml.
         "SHOPIFY_APP_URL": "https://release-subscriptions-cake-zine.ne-dev.workers.dev",
         "SCOPES": "write_products,read_customers,write_customers,read_customer_payment_methods,write_own_subscription_contracts,write_orders,write_merchant_managed_fulfillment_orders,write_validations,read_shopify_payments_disputes,read_all_orders",
@@ -85,8 +85,8 @@
         {
           "binding": "DB",
           "database_name": "release-subscriptions-cake-zine",
-          // PLACEHOLDER: the ID `wrangler d1 create release-subscriptions-cake-zine` prints.
-          "database_id": "00000000-0000-0000-0000-000000000000",
+          // Created in ENAM, the dev database's region.
+          "database_id": "3fc26557-d76f-427c-95fe-e57d6ba97cb9",
           "migrations_dir": "migrations"
         }
       ],
