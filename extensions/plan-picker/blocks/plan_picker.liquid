@@ -28,7 +28,6 @@
   endif
   assign has_plans = false
   assign gift_plans = ',' | append: app.metafields.release_subscriptions.giftable_plans.value | append: ','
-  assign has_gift_plans = false
   for group in product.selling_plan_groups
     if group.app_id == 'release-subscriptions'
       assign has_plans = true
@@ -39,59 +38,7 @@
   {{ 'plan-picker.css' | asset_url | stylesheet_tag }}
   <fieldset class="plan-picker" {{ block.shopify_attributes }}>
     <legend class="plan-picker__legend{{ legend_class }}">{{ legend | escape }}</legend>
-    {%- assign first = true -%}
-    {%- for group in product.selling_plan_groups -%}
-      {%- if group.app_id == 'release-subscriptions' -%}
-      {%- for plan in group.selling_plans -%}
-        {%- assign adjustment = plan.price_adjustments.first -%}
-        {%- assign plan_key = ',' | append: plan.id | append: ',' -%}
-        {%- assign gift_plan = false -%}
-        {%- if gift_plans contains plan_key -%}
-          {%- assign gift_plan = true -%}
-          {%- assign has_gift_plans = true -%}
-        {%- endif -%}
-        <label class="plan-picker__option">
-          <input
-            type="radio"
-            name="selling_plan"
-            value="{{ plan.id }}"
-            form="{{ form_id }}"
-            data-giftable="{{ gift_plan }}"
-            {% if first %}checked{% endif %}
-            {% unless product.available %}disabled{% endunless %}
-          >
-          <span class="plan-picker__name">{{ plan.name | escape }}</span>
-          {%- if adjustment.value_type == 'price' -%}
-            <span class="plan-picker__price">{{ adjustment.value | money }}</span>
-          {%- endif -%}
-        </label>
-        {%- assign first = false -%}
-      {%- endfor -%}
-      {%- endif -%}
-    {%- endfor -%}
-    {%- if has_gift_plans -%}
-      <div class="plan-picker__gift" data-plan-picker-gift hidden>
-        <label class="plan-picker__option">
-          <input type="checkbox" data-gift-toggle>
-          <span class="plan-picker__name">{{ 'plan_picker.gift' | t }}</span>
-        </label>
-        <div class="plan-picker__gift-fields" data-gift-fields hidden>
-          <label class="plan-picker__field">
-            <span>{{ 'plan_picker.gift_email' | t }}</span>
-            <input type="email" name="properties[Gift recipient email]" form="{{ form_id }}" maxlength="254" autocomplete="off" disabled>
-          </label>
-          <label class="plan-picker__field">
-            <span>{{ 'plan_picker.gift_name' | t }}</span>
-            <input type="text" name="properties[Gift recipient name]" form="{{ form_id }}" maxlength="100" autocomplete="off" disabled>
-          </label>
-          <label class="plan-picker__field">
-            <span>{{ 'plan_picker.gift_message' | t }}</span>
-            <textarea name="properties[Gift message]" form="{{ form_id }}" maxlength="500" rows="3" disabled></textarea>
-          </label>
-          <p class="plan-picker__terms">{{ 'plan_picker.gift_note' | t }}</p>
-        </div>
-      </div>
-    {%- endif -%}
+    {%- render 'plan-options', product: product, form_id: form_id, gift_plans: gift_plans -%}
     <script src="{{ 'plan-picker.js' | asset_url }}" defer></script>
     {%- if block.settings.terms != blank -%}
       <p class="plan-picker__terms">{{ block.settings.terms | escape }}</p>

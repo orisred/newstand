@@ -151,11 +151,30 @@ const SET_METAFIELD = `#graphql
   }`;
 
 /**
+ * Writes a text metafield on the app's installation, which the theme blocks read as
+ * `app.metafields.release_subscriptions.<key>`. Returns false if Shopify refused it.
+ */
+export async function setAppMetafield(graphql: Graphql, key: string, value: string) {
+  const { currentAppInstallation: installation } = await graphql(APP_INSTALLATION);
+  const { metafieldsSet: result } = await graphql(SET_METAFIELD, {
+    metafields: [
+      {
+        ownerId: installation.id,
+        namespace: "release_subscriptions",
+        key,
+        type: "single_line_text_field",
+        value,
+      },
+    ],
+  });
+  return result.userErrors.length === 0;
+}
+
+/**
  * Tells the plan picker which selling plans take a gift: the numeric IDs of the shop's giftable
- * bundles, comma separated and wrapped in commas (`,123,456,`), so Liquid can test for `,123,`. It's
- * a metafield on the app's installation, which the theme block reads as `app.metafields`. Run after
- * each plan sync, from the plans as they stand then. A failure never blocks a sync: the picker then
- * just shows the list it had.
+ * bundles, comma separated and wrapped in commas (`,123,456,`), so Liquid can test for `,123,`. Run
+ * after each plan sync, from the plans as they stand then. A failure never blocks a sync: the picker
+ * then just shows the list it had.
  */
 export async function publishGiftPlans(db: Db, graphql: Graphql, shopId: string) {
   try {
@@ -171,19 +190,9 @@ export async function publishGiftPlans(db: Db, graphql: Graphql, shopId: string)
       select: { sellingPlanGid: true },
     });
     const ids = plans.map((plan) => plan.sellingPlanGid!.split("/").pop());
-    const { currentAppInstallation: installation } = await graphql(APP_INSTALLATION);
-    const { metafieldsSet: result } = await graphql(SET_METAFIELD, {
-      metafields: [
-        {
-          ownerId: installation.id,
-          namespace: "release_subscriptions",
-          key: "giftable_plans",
-          type: "single_line_text_field",
-          value: `,${ids.join(",")},`,
-        },
-      ],
-    });
-    if (result.userErrors.length > 0) logEvent("error", "gift_plans.refused", {});
+    if (!(await setAppMetafield(graphql, "giftable_plans", `,${ids.join(",")},`))) {
+      logEvent("error", "gift_plans.refused", {});
+    }
   } catch {
     logEvent("error", "gift_plans.failed", {});
   }

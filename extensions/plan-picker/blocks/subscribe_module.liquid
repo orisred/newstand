@@ -1,0 +1,92 @@
+{%- comment -%}
+  Sells this app's plans from another product's page: the subscription product is chosen in the
+  block's settings, and the plans are listed as in the plan picker, gift fields included (the same
+  snippet and script). It shows only on products the app lists in
+  `app.metafields.release_subscriptions.release_products`, the products behind the releases, so it
+  can sit on a shared product template. The button adds the subscription product with the chosen
+  plan through the cart AJAX API, so the buyer stays on the page. The block is its own form, so put
+  it outside the theme's product form. Switch it off by disabling or removing the block.
+{%- endcomment -%}
+{%- liquid
+  assign sub = block.settings.product
+  assign is_release = false
+  assign here = ',' | append: product.id | append: ','
+  if app.metafields.release_subscriptions.release_products.value contains here and product.id != sub.id
+    assign is_release = true
+  endif
+  assign has_plans = false
+  for group in sub.selling_plan_groups
+    if group.app_id == 'release-subscriptions'
+      assign has_plans = true
+    endif
+  endfor
+  assign gift_plans = ',' | append: app.metafields.release_subscriptions.giftable_plans.value | append: ','
+  assign form_id = 'subscribe-form-' | append: section.id
+-%}
+{%- if is_release and has_plans -%}
+  {{ 'plan-picker.css' | asset_url | stylesheet_tag }}
+  <form
+    id="{{ form_id }}"
+    class="subscribe-module"
+    action="{{ routes.cart_add_url }}"
+    method="post"
+    data-subscribe-module
+    data-variant="{{ sub.selected_or_first_available_variant.id }}"
+    data-cart-url="{{ routes.cart_url }}"
+    data-added="{{ 'subscribe.added' | t | escape }}"
+    data-view-cart="{{ 'subscribe.view_cart' | t | escape }}"
+    data-error="{{ 'subscribe.error' | t | escape }}"
+    {{ block.shopify_attributes }}
+  >
+    <input type="hidden" name="id" value="{{ sub.selected_or_first_available_variant.id }}">
+    <input type="hidden" name="quantity" value="1">
+    <fieldset class="plan-picker">
+      <legend class="plan-picker__legend">{{ block.settings.heading | escape }}</legend>
+      {%- render 'plan-options', product: sub, form_id: form_id, gift_plans: gift_plans -%}
+      {%- if block.settings.terms != blank -%}
+        <p class="plan-picker__terms">{{ block.settings.terms | escape }}</p>
+      {%- endif -%}
+    </fieldset>
+    <button type="submit" class="button" {% unless sub.available %}disabled{% endunless %}>{{ block.settings.button | escape }}</button>
+    <p class="plan-picker__terms" role="status" data-subscribe-status></p>
+    <script src="{{ 'plan-picker.js' | asset_url }}" defer></script>
+    <script src="{{ 'subscribe-module.js' | asset_url }}" defer></script>
+  </form>
+{%- elsif request.design_mode -%}
+  <p class="plan-picker__terms" {{ block.shopify_attributes }}>
+    The subscribe module is hidden here: {% if sub == blank %}choose the subscription product in its settings{% elsif has_plans == false %}the chosen product has no plans from Release Subscriptions{% else %}this product isn't linked to a release in the app{% endif %}.
+  </p>
+{%- endif -%}
+
+{% schema %}
+{
+  "name": "Subscribe module",
+  "target": "section",
+  "settings": [
+    {
+      "type": "product",
+      "id": "product",
+      "label": "Subscription product",
+      "info": "The product that carries your plans."
+    },
+    {
+      "type": "text",
+      "id": "heading",
+      "label": "Heading",
+      "default": "Subscribe"
+    },
+    {
+      "type": "text",
+      "id": "button",
+      "label": "Button label",
+      "default": "Subscribe"
+    },
+    {
+      "type": "textarea",
+      "id": "terms",
+      "label": "Subscription terms",
+      "info": "Shown under the plans: how often and when customers are billed, that it renews automatically, and how to cancel. Leave empty to show nothing."
+    }
+  ]
+}
+{% endschema %}

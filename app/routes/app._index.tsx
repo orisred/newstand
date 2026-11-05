@@ -39,6 +39,7 @@ import {
   parseTitle,
   releasesPageData,
   scheduleRelease,
+  publishReleaseProducts,
   setReleaseProduct,
   TITLE_MAX_LENGTH,
 } from "../releases.server";
@@ -299,6 +300,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       String(form.get("productGid")),
       String(form.get("productTitle")),
     );
+    if (saved) await publishReleaseProducts(db, graphqlOf(admin), shop.id);
     return {
       ok: saved,
       message: saved

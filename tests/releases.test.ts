@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- a fake of Shopify's loosely typed responses */
 import { applyD1Migrations, env } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createDb } from "../app/db.server";
@@ -13,6 +14,7 @@ import {
   PAGE_SIZE,
   parseQuantity,
   parseTitle,
+  publishReleaseProducts,
   transitionRelease,
 } from "../app/releases.server";
 import { getOrCreateShop } from "../app/shop.server";
@@ -240,5 +242,80 @@ describe("input parsing", () => {
     for (const bad of ["0", "-1", "1.5", "abc", "1e9"]) {
       expect(parseQuantity(bad)).toEqual({ error: true });
     }
+  });
+});
+
+describe("telling the subscribe block which products are issues", () => {
+  const variant = (id: number) => `gid://shopify/ProductVariant/${id}`;
+  const fake = (productOf: Record<string, number | null>, refuse = false) => {
+    const calls: any[] = [];
+    const graphql = async (query: string, variables: any) => {
+      calls.push(variables);
+      if (query.includes("GiftAppInstallation")) return { currentAppInstallation: { id: "gid://shopify/AppInstallation/1" } };
+      if (query.includes("ReleaseProducts")) {
+        return {
+          nodes: variables.ids.map((id: string) =>
+            productOf[id] ? { product: { id: `gid://shopify/Product/${productOf[id]}` } } : null,
+          ),
+        };
+      }
+      return { metafieldsSet: { userErrors: refuse ? [{ message: "no" }] : [] } };
+    };
+    return { calls, graphql: graphql as any };
+  };
+
+  async function withVariants(...variants: (string | null)[]) {
+    const shop = await newShop();
+    for (const [i, productGid] of variants.entries()) {
+      await createRelease(db(), shop.id, { key: `k${i}`, title: "T", quantity: null });
+      await db().release.update({ where: { id: `${shop.id}:k${i}` }, data: { productGid } });
+    }
+    return shop;
+  }
+
+  it("lists each release's product once, as ,id,id, and skips releases with no product or a deleted one", async () => {
+    const shop = await withVariants(variant(1), variant(2), variant(3), null, variant(4));
+    const { calls, graphql } = fake({ [variant(1)]: 10, [variant(2)]: 10, [variant(3)]: 30, [variant(4)]: null });
+    await publishReleaseProducts(db(), graphql, shop.id);
+    const [field] = calls.at(-1).metafields;
+    expect(field).toMatchObject({
+      ownerId: "gid://shopify/AppInstallation/1",
+      namespace: "release_subscriptions",
+      key: "release_products",
+    });
+    expect(field.value.split(",").filter(Boolean).sort()).toEqual(["10", "30"]);
+    expect(field.value).toMatch(/^,.*,$/);
+  });
+
+  it("follows a changed product, and publishes an empty list when none is left", async () => {
+    const shop = await withVariants(variant(5));
+    const productOf: Record<string, number | null> = { [variant(5)]: 50, [variant(6)]: 60 };
+    const { calls, graphql } = fake(productOf);
+    await publishReleaseProducts(db(), graphql, shop.id);
+    expect(calls.at(-1).metafields[0].value).toBe(",50,");
+    await db().release.update({ where: { id: `${shop.id}:k0` }, data: { productGid: variant(6) } });
+    await publishReleaseProducts(db(), graphql, shop.id);
+    expect(calls.at(-1).metafields[0].value).toBe(",60,");
+    await db().release.update({ where: { id: `${shop.id}:k0` }, data: { productGid: null } });
+    await publishReleaseProducts(db(), graphql, shop.id);
+    expect(calls.at(-1).metafields[0].value).toBe(",,");
+  });
+
+  it("asks Shopify for at most 250 variants at a time", async () => {
+    const shop = await withVariants(...Array.from({ length: 251 }, (_, i) => variant(1000 + i)));
+    const { calls, graphql } = fake(Object.fromEntries(Array.from({ length: 251 }, (_, i) => [variant(1000 + i), 1000 + i])));
+    await publishReleaseProducts(db(), graphql, shop.id);
+    expect(calls.filter((c) => c?.ids).map((c) => c.ids.length).sort()).toEqual([1, 250]);
+    expect(calls.at(-1).metafields[0].value.split(",").filter(Boolean)).toHaveLength(251);
+  });
+
+  it("a failure or a refusal never throws into the caller", async () => {
+    const shop = await withVariants(variant(7));
+    await expect(
+      publishReleaseProducts(db(), (async () => { throw new Error("down"); }) as any, shop.id),
+    ).resolves.toBeUndefined();
+    await expect(
+      publishReleaseProducts(db(), fake({ [variant(7)]: 70 }, true).graphql, shop.id),
+    ).resolves.toBeUndefined();
   });
 });

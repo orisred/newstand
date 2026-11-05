@@ -11,7 +11,8 @@ import {
 import { emailRunJob } from "./notification-jobs";
 import { listStockWarnings, listUnsureEmails } from "./dashboard.server";
 import { DOUBLE_CHARGE_EVENT } from "./billing.server";
-import { GIFT_INVALID_EVENT } from "./gifts.server";
+import { GIFT_INVALID_EVENT, setAppMetafield } from "./gifts.server";
+import type { Graphql } from "./plan-sync.server";
 import { createDueDeliveries } from "./release-runs.server";
 import { DATA_REQUEST_EVENT } from "./gdpr.server";
 import {
@@ -261,6 +262,38 @@ export async function setReleaseProduct(
     releaseRunJob(shop.shopDomain, releaseId, crypto.randomUUID()),
   ]);
   return true;
+}
+
+const RELEASE_PRODUCTS = `#graphql
+  query ReleaseProducts($ids: [ID!]!) {
+    nodes(ids: $ids) { ... on ProductVariant { product { id } } }
+  }`;
+
+/**
+ * Tells the subscribe block which products are issues: the numeric IDs of the products behind the
+ * releases' variants, comma separated and wrapped in commas (`,123,456,`), as `release_products`
+ * (see `publishGiftPlans`). A variant Shopify no longer has is left out. Run when a release's
+ * product is chosen and after each plan sync, which also repairs a write that failed. A failure
+ * never reaches the caller: the block then shows the list it had.
+ */
+export async function publishReleaseProducts(db: Db, graphql: Graphql, shopId: string) {
+  try {
+    const releases = await db.release.findMany({
+      where: { shopId, productGid: { not: null } },
+      select: { productGid: true },
+    });
+    const variants = [...new Set(releases.map((release) => release.productGid!))];
+    const products = new Set<string>();
+    for (let i = 0; i < variants.length; i += 250) {
+      const { nodes } = await graphql(RELEASE_PRODUCTS, { ids: variants.slice(i, i + 250) });
+      for (const node of nodes) if (node?.product) products.add(node.product.id.split("/").pop());
+    }
+    if (!(await setAppMetafield(graphql, "release_products", `,${[...products].join(",")},`))) {
+      logEvent("error", "release_products.refused", {});
+    }
+  } catch {
+    logEvent("error", "release_products.failed", {});
+  }
 }
 
 export type TransitionResult =
