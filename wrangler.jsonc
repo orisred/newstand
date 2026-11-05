@@ -58,5 +58,54 @@
   "triggers": {
     // Hourly tick: the scheduled handler finds due work and enqueues it.
     "crons": ["0 * * * *"]
+  },
+  // Cake Zine's production app (docs/CUTOVER.md, B3), deployed with `npm run deploy:worker:cake-zine`.
+  // Its own Worker, D1 and queues, so its data never meets the dev store's. Bindings aren't inherited, so
+  // each is set again here. Never set EMAIL_RECIPIENT_DOMAINS on it. PLACEHOLDER values are filled in
+  // when the app, D1 and sending domain exist: nothing here has been created yet.
+  "env": {
+    "production": {
+      "name": "release-subscriptions-cake-zine",
+      "workers_dev": true,
+      "preview_urls": false,
+      "vars": {
+        // PLACEHOLDER: client_id in shopify.app.cake-zine.toml.
+        "SHOPIFY_API_KEY": "PLACEHOLDER_PRODUCTION_CLIENT_ID",
+        // Keep in step with application_url in shopify.app.cake-zine.toml.
+        "SHOPIFY_APP_URL": "https://release-subscriptions-cake-zine.ne-dev.workers.dev",
+        "SCOPES": "write_products,read_customers,write_customers,read_customer_payment_methods,write_own_subscription_contracts,write_orders,write_merchant_managed_fulfillment_orders,write_validations,read_shopify_payments_disputes,read_all_orders",
+        "SHOP_CUSTOM_DOMAIN": "",
+        // PLACEHOLDER: the sending domain is N's choice (docs/CUTOVER.md, A1). `.invalid` can't send.
+        "EMAIL_FROM_ADDRESS": "no-reply@placeholder-sending-domain.invalid"
+      },
+      "send_email": [{ "name": "EMAIL", "remote": true }],
+      // The production app's own secret, set with `wrangler secret put SHOPIFY_API_SECRET --env production`.
+      "secrets": { "required": ["SHOPIFY_API_SECRET"] },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "release-subscriptions-cake-zine",
+          // PLACEHOLDER: the ID `wrangler d1 create release-subscriptions-cake-zine` prints.
+          "database_id": "00000000-0000-0000-0000-000000000000",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "queues": {
+        "producers": [{ "binding": "JOBS", "queue": "release-subscriptions-cake-zine-jobs" }],
+        "consumers": [
+          {
+            "queue": "release-subscriptions-cake-zine-jobs",
+            "max_retries": 5,
+            "dead_letter_queue": "release-subscriptions-cake-zine-jobs-dlq"
+          },
+          {
+            "queue": "release-subscriptions-cake-zine-jobs-dlq",
+            "max_retries": 10,
+            "retry_delay": 300
+          }
+        ]
+      },
+      "triggers": { "crons": ["0 * * * *"] }
+    }
   }
 }

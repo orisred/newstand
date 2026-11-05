@@ -21,6 +21,8 @@
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
     "deploy:worker": "npm run build && wrangler deploy",
+    "deploy:cake-zine": "node scripts/deploy-app.mjs cake-zine",
+    "deploy:worker:cake-zine": "CLOUDFLARE_ENV=production npm run build && wrangler deploy",
     "wrangler": "wrangler",
     "postinstall": "prisma generate",
     "dev:worker": "CLOUDFLARE_INCLUDE_PROCESS_ENV=true react-router dev"

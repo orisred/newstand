@@ -1013,6 +1013,17 @@ describe("the dry run", () => {
 });
 
 describe("the real run", () => {
+  it("gives a per-release contract the per-release cycle, as a checkout would", async () => {
+    const t = await setup({ billingMode: "PER_RELEASE", releasesPerTerm: 1, termMonths: null, priceCents: 1300 });
+    t.add(1, [order(ago(100), [{ variant: { id: SUB_VARIANT }, ...priced("13.00") }])]);
+    await t.realRun(await t.dryRun([contact(1)]));
+    expect(t.state.created).toHaveLength(1);
+    expect(t.state.created[0].input.contract).toMatchObject({
+      billingPolicy: { interval: "MONTH", intervalCount: 12 },
+      deliveryPolicy: { interval: "MONTH", intervalCount: 12 },
+    });
+  });
+
   it("creates the contract and Subscription, with nothing on the side", async () => {
     const t = await setup();
     const gid = t.add(1, [order(ago(100), [{ variant: { id: SUB_VARIANT }, currentQuantity: 2, ...priced("37.50") }])]);
