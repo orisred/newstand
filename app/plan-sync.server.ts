@@ -70,13 +70,16 @@ export type SyncablePlan = {
  * and the delivery policy only labels the contract. The values are chosen so the contract's
  * dates stay meaningful and out of the way:
  * - a bundle: its term, so the contract's next billing date is the term date;
- * - pay per release: a year, because releases don't follow a schedule.
+ * - pay per release: 12 months, because releases don't follow a schedule. Not `YEAR` x 1, which a
+ *   12-month bundle has: Shopify puts plans with the same cycle on one contract, and nothing stops
+ *   both in one cart where the cart rule can't run (N, 2026-11-05; "Cutover and install").
  * No anchors, cutoff or cycle limits, so nothing caps how many cycles the app can bill.
  */
 export function cycleOf(
   plan: Pick<SyncablePlan, "billingMode" | "termMonths">,
 ) {
-  const months = plan.billingMode === "PREPAID_BUNDLE" ? plan.termMonths : null;
+  if (plan.billingMode !== "PREPAID_BUNDLE") return { interval: "MONTH", intervalCount: 12 };
+  const months = plan.termMonths;
   if (!months) return { interval: "YEAR", intervalCount: 1 };
   return months % 12 === 0
     ? { interval: "YEAR", intervalCount: months / 12 }

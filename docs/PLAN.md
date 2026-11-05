@@ -39,6 +39,7 @@ Deferred: bundles, swaps, add-ons with a release, print-run caps, gated digital 
 - Data in D1 (SQLite) via Prisma's D1 adapter, including sessions.
 - One Worker with three handlers: `fetch` (embedded app, webhooks, portal API), `scheduled` (hourly Cron Trigger finds due work), `queue` (Cloudflare Queues consumer does billing, order runs, emails).
 - Workers Paid plan: about $5 a month for Cake Zine and roughly $5 to $10 at 500 shops.
+- Apps (N, 2026-11-05): Cake Zine runs this app internally, as a custom app in a store-owned organization that holds its contracts. A public version comes later as a separate app in a Partner organization. Each app has its own Worker and D1; the dev app keeps `newstand-dev` (see "Cutover and install" in `DECISIONS.md`).
 - Jobs: pre-order announcement (switch new subscribers), order run at the shop's order timing step (create orders and charge per-release plans together), renewal billing, retries, reminder emails, member tag updates.
 - Webhooks: subscription contract create/update, billing attempt success/failure, customer and shop GDPR, app uninstalled.
 - Extensions: theme app extension (plan picker), customer account UI extension (portal).
@@ -94,5 +95,5 @@ Prisma models are in `prisma/schema.prisma`.
 4. Release runs: announce and ready-to-ship actions (manual or scheduled); the run creates $0 orders, closes the release, CSV export.
 5. Renewals: term-date renewals with late-release hold, per-release charges, retries, pause, price-change policy, emails.
 6. Portal, gifts and perks: customer account extension, gift checkout, member tag, Flow triggers.
-7. Migration: import script, dry run, cutover.
-8. Public listing: Billing API, GDPR webhooks, onboarding, listing, review.
+7. Migration: import script, dry run, cutover (`docs/CUTOVER.md`).
+8. Public listing, as a new app in a Partner organization: Billing API, GDPR webhooks, onboarding, listing, review.

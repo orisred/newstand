@@ -1,7 +1,8 @@
 {%- comment -%}
   Lists this app's plans for the product and submits the chosen one as `selling_plan` with the
-  theme's product form, so it works with the add to cart and dynamic checkout buttons. The radios
-  join the form through the `form` attribute, so there is no JavaScript. Most themes name the form
+  theme's product form. The radios join the form through the `form` attribute, which is enough for
+  add to cart without JavaScript. The script puts the choice in a hidden input inside the form
+  instead, because Buy it now only reads it from there. Most themes name the form
   `product-form-<section id>`; the "Product form ID" setting covers one that doesn't.
 
   Only plans with this app's `app_id` are shown, so another app's plans never appear here.
@@ -11,7 +12,8 @@
   A giftable plan (the app lists them in `app.metafields.release_subscriptions.giftable_plans`) also
   offers "This is a gift": the recipient's email, name and a message, sent as line item properties
   that the app reads from the subscription contract. They're disabled, so not sent, unless a
-  giftable plan is chosen and the box is ticked. Without JavaScript the gift option never shows.
+  giftable plan is chosen and the box is ticked, and then the recipient's email is required. Without
+  JavaScript the gift option never shows.
 {%- endcomment -%}
 {%- liquid
   assign form_id = block.settings.form_id
@@ -89,8 +91,8 @@
           <p class="plan-picker__terms">{{ 'plan_picker.gift_note' | t }}</p>
         </div>
       </div>
-      <script src="{{ 'plan-picker.js' | asset_url }}" defer></script>
     {%- endif -%}
+    <script src="{{ 'plan-picker.js' | asset_url }}" defer></script>
     {%- if block.settings.terms != blank -%}
       <p class="plan-picker__terms">{{ block.settings.terms | escape }}</p>
     {%- endif -%}

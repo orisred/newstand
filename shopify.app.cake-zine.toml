@@ -1,0 +1,57 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+#
+# Cake Zine's production app (docs/CUTOVER.md, B2). The app doesn't exist yet: replace the PLACEHOLDER
+# client_id once it's created, and point application_url at the production Worker (wrangler.jsonc,
+# env "production"). Deploy with `npm run deploy:cake-zine`, which sets the portal's API URL from
+# application_url. Keep webhooks and scopes in step with shopify.app.toml.
+
+client_id = "PLACEHOLDER_PRODUCTION_CLIENT_ID"
+name = "Release Subscriptions"
+application_url = "https://release-subscriptions-cake-zine.ne-dev.workers.dev"
+embedded = true
+# Cake Zine is on Basic, where a custom app can't run Functions or Flow triggers, so the cart rule
+# (extensions/one-plan-per-cart) and the Flow triggers (extensions/flow-triggers) are left out.
+extension_directories = [ "extensions/plan-picker", "extensions/customer-portal" ]
+
+[webhooks]
+api_version = "2026-10"
+
+  [[webhooks.subscriptions]]
+  topics = [ "app/uninstalled" ]
+  uri = "/webhooks/app/uninstalled"
+
+  [[webhooks.subscriptions]]
+  topics = [ "app/scopes_update" ]
+  uri = "/webhooks/app/scopes_update"
+
+  [[webhooks.subscriptions]]
+  topics = [ "subscription_contracts/create", "subscription_contracts/update" ]
+  uri = "/webhooks/subscription_contracts"
+
+  [[webhooks.subscriptions]]
+  topics = [ "subscription_billing_attempts/success", "subscription_billing_attempts/failure", "subscription_billing_attempts/challenged" ]
+  uri = "/webhooks/subscription_billing_attempts"
+
+  [[webhooks.subscriptions]]
+  topics = [ "customer_payment_methods/create", "customer_payment_methods/update" ]
+  uri = "/webhooks/customer_payment_methods"
+
+  [[webhooks.subscriptions]]
+  topics = [ "disputes/create" ]
+  uri = "/webhooks/disputes"
+
+  [[webhooks.subscriptions]]
+  compliance_topics = [ "customers/data_request", "customers/redact", "shop/redact" ]
+  uri = "/webhooks/compliance"
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "write_products,read_customers,write_customers,read_customer_payment_methods,write_own_subscription_contracts,write_orders,write_merchant_managed_fulfillment_orders,write_validations,read_shopify_payments_disputes,read_all_orders"
+optional_scopes = [ ]
+use_legacy_install_flow = false
+
+[auth]
+redirect_urls = [ ]
+
+[build]
+automatically_update_urls_on_dev = true

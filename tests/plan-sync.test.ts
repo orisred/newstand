@@ -288,7 +288,7 @@ describe("the selling plan payload", () => {
     });
   });
 
-  it("a per-release plan: one year, with no cycle limit, anchor or cutoff to act on", () => {
+  it("a per-release plan: every 12 months, with no cycle limit, anchor or cutoff to act on", () => {
     const plan = {
       ...base,
       billingMode: "PER_RELEASE" as const,
@@ -296,8 +296,9 @@ describe("the selling plan payload", () => {
     };
     const [selling] = groupCreateInput(plan).sellingPlansToCreate;
     expect(selling.billingPolicy).toEqual({
-      recurring: { interval: "YEAR", intervalCount: 1 },
+      recurring: { interval: "MONTH", intervalCount: 12 },
     });
+    expect(selling.deliveryPolicy.recurring).toMatchObject({ interval: "MONTH", intervalCount: 12 });
     expect(JSON.stringify(selling)).not.toMatch(
       /anchors|cutoff|minCycles|maxCycles/,
     );
@@ -310,10 +311,15 @@ describe("the selling plan payload", () => {
     expect(bundle(24)).toEqual({ interval: "YEAR", intervalCount: 2 });
     expect(bundle(18)).toEqual({ interval: "MONTH", intervalCount: 18 });
     expect(bundle(6)).toEqual({ interval: "MONTH", intervalCount: 6 });
+    // Not YEAR x 1 like a 12-month bundle: Shopify puts plans with the same cycle on one contract.
     expect(cycleOf({ billingMode: "PER_RELEASE", termMonths: null })).toEqual({
-      interval: "YEAR",
-      intervalCount: 1,
+      interval: "MONTH",
+      intervalCount: 12,
     });
+    expect(cycleOf({ billingMode: "PER_RELEASE", termMonths: 12 })).toEqual(
+      cycleOf({ billingMode: "PER_RELEASE", termMonths: null }),
+    );
+    expect(cycleOf({ billingMode: "PER_RELEASE", termMonths: null })).not.toEqual(bundle(12));
   });
 
   it("an update carries the selling plan's ID and the same fields", () => {
@@ -749,5 +755,24 @@ describe("describeDifferences", () => {
     );
     expect(differences.join("\n")).toMatch(/Billing interval/);
     expect(differences.join("\n")).toMatch(/Billing cycle limits/);
+  });
+  it("a per-release plan synced before it moved to every 12 months differs, and a sync moves it", async () => {
+    const { shop, id } = await newPlan();
+    await db().plan.update({ where: { id }, data: { billingMode: "PER_RELEASE", releasesPerTerm: 1, termMonths: null } });
+    const shopify = fakeShopify();
+    await syncPlan(db(), shopify.graphql, shop.id, id);
+    const [group] = [...shopify.groups.values()];
+    const [selling] = group.sellingPlans.nodes;
+    selling.billingPolicy = { ...selling.billingPolicy, interval: "YEAR", intervalCount: 1 };
+    selling.deliveryPolicy = { ...selling.deliveryPolicy, interval: "YEAR", intervalCount: 1 };
+    const plan = (await row(id)) as SyncablePlan;
+    const differences = describeDifferences(plan, group, "USD").join("\n");
+    expect(differences).toMatch(/Billing interval/);
+    expect(differences).toMatch(/Delivery interval/);
+    const update = groupUpdateInput(plan, selling.id);
+    expect(update.sellingPlansToUpdate[0]).toMatchObject({
+      billingPolicy: { recurring: { interval: "MONTH", intervalCount: 12 } },
+      deliveryPolicy: { recurring: { interval: "MONTH", intervalCount: 12 } },
+    });
   });
 });
