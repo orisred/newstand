@@ -97,6 +97,11 @@ module.exports = {
         node: true,
       },
     },
+    // The customer account extension is Preact JSX without prop types.
+    {
+      files: ["extensions/customer-portal/**/*.{js,jsx,ts}"],
+      rules: { "react/prop-types": "off", "@typescript-eslint/ban-ts-comment": "off" },
+    },
   ],
   globals: {
     shopify: "readonly"

@@ -2,8 +2,8 @@
  * Signed, expiring links in emails. A link names a subscription (and a release) by internal ID
  * and says nothing about the customer. The signature stops anyone making up or changing one.
  *
- * Anyone who holds the link can use it until it expires, so Step 11 must let it do no more than
- * record that an address was confirmed, and ask the customer to sign in for anything else.
+ * Anyone who holds the link can use it until it expires, so it can do no more than record, on an
+ * explicit click, that an address was confirmed. Anything else needs the customer to sign in.
  */
 
 export type LinkKind = "address" | "card";
@@ -105,7 +105,18 @@ export async function verifyLinkToken(
   }
 }
 
-/** Where an email's button goes. Until Step 11 it lands on the app's own placeholder page. */
+/**
+ * The customer portal: the customer account extension, which shows on the Profile page. Signing in
+ * is Shopify's, with the email address and a code. It shows only once a merchant has placed the
+ * extension in the checkout and accounts editor (Customize on the customer accounts settings,
+ * Apps, add it to Profile, Save); until then the Profile page has nothing of ours on it.
+ */
+export const portalUrl = (shopGid: string | undefined, shopDomain: string) =>
+  shopGid
+    ? `https://shopify.com/${shopGid.split("/").pop()}/account/profile`
+    : `https://${shopDomain}/account`;
+
+/** Where an email's button goes: the app's link page, which sends the customer on to the portal. */
 export async function linkUrl(
   env: Pick<Env, "SHOPIFY_API_SECRET" | "SHOPIFY_APP_URL">,
   link: { k: LinkKind; s: string; r?: string },

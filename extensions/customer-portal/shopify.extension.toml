@@ -1,0 +1,30 @@
+# Learn more about configuring your Customer account UI extension:
+# https://shopify.dev/docs/api/customer-account-ui-extensions/latest#configuration
+
+# The version of APIs your extension will receive. Learn more:
+# https://shopify.dev/docs/api/usage/versioning
+api_version = "2026-10"
+
+[[extensions]]
+name = "Subscription"
+handle = "customer-portal"
+type = "ui_extension"
+uid = "1394a431-4663-d0ee-17c3-448fe106c4f5a514f9b0"
+
+# Controls where in Shopify your extension will be injected,
+# and the file that contains your extension’s source code. Learn more:
+# https://shopify.dev/docs/api/customer-account-ui-extensions/latest/targets
+
+[[extensions.targeting]]
+module = "./src/Portal.jsx"
+target = "customer-account.profile.addresses.render-after"
+
+[extensions.capabilities]
+# Gives your extension access to directly query Shopify’s storefront API.
+# https://shopify.dev/docs/apps/build/customer-accounts/capabilities#storefront-api-access
+api_access = false
+
+# Gives your extension access to make external network calls, using the
+# JavaScript `fetch()` API. Learn more:
+# https://shopify.dev/docs/apps/build/customer-accounts/capabilities#network-access
+network_access = true

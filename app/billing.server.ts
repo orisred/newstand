@@ -18,6 +18,7 @@ export const BILLING_RECOVER_JOB = "billing.recover";
 export const BILLING_RENEW_JOB = "billing.renew";
 export const BILLING_RETRY_JOB = "billing.retry";
 export const BILLING_RESUME_JOB = "billing.resume";
+export const CARD_UPDATED_JOB = "billing.card_updated";
 export const DISPUTE_JOB = "billing.dispute";
 
 export const FAILED_PAYMENT = "FAILED_PAYMENT";
@@ -26,6 +27,11 @@ export const CHARGEBACK = "CHARGEBACK";
 /** Days to wait before each retry: three tries, on days 0, 3 and 7, then a pause. */
 const RETRY_AFTER_DAYS = [3, 4];
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** A customer's retry is refused once a charge has had this many attempts in the last hour, however they started. */
+const CUSTOMER_RETRY_WINDOW_MS = 60 * 60 * 1000;
+const MAX_ATTEMPTS_PER_WINDOW = 2;
+/** How long a bank's challenge is assumed completable. Shopify doesn't say; a merchant's retry ignores it. */
+const CHALLENGE_WAIT_MS = 3 * DAY_MS;
 /** A result still unknown after this is looked up: Shopify took about 2 seconds when measured. */
 const LOST_RESULT_AFTER_MS = 10 * 60 * 1000;
 
@@ -954,6 +960,7 @@ export async function retryCharge(
   subscriptionId: string,
   byMerchant: boolean,
   now = new Date(),
+  savedCard = false,
 ): Promise<Job[]> {
   const subscription = await db.subscription.findUnique({
     where: { id: subscriptionId },
@@ -1030,9 +1037,33 @@ export async function retryCharge(
   const last = await db.billingAttempt.findFirst({
     where: { subscriptionId, chargeFor },
     orderBy: { attempt: "desc" },
-    select: { attempt: true, result: true },
+    select: { attempt: true, result: true, errorCode: true, createdAt: true },
   });
   if (last?.result === "SUCCEEDED") return [];
+  // A customer's card update or "try again" can come at any time and as often as they like, so it
+  // is held to two rules a merchant's press isn't (see "Customers can start a charge" in DECISIONS.md).
+  // A newly saved card is the customer asking for exactly one try, so it skips both (N, 2026-11-04).
+  // It is not the merchant: only `byMerchant` ends a chargeback.
+  if (!byMerchant && !savedCard && last) {
+    // A bank's challenge may still be completed, and that attempt would charge as well as this one.
+    const challenged =
+      last.errorCode === "ACTION_REQUIRED" &&
+      now.getTime() - last.createdAt.getTime() < CHALLENGE_WAIT_MS;
+    const recent = await db.billingAttempt.count({
+      where: {
+        subscriptionId,
+        chargeFor,
+        createdAt: { gt: new Date(now.getTime() - CUSTOMER_RETRY_WINDOW_MS) },
+      },
+    });
+    if (challenged || recent >= MAX_ATTEMPTS_PER_WINDOW) {
+      logEvent("info", "billing.customer_retry_declined", {
+        subscriptionId,
+        reason: challenged ? "bank_challenge" : "too_soon",
+      });
+      return [];
+    }
+  }
   await attemptCharge(
     db,
     rawDb,
@@ -1111,18 +1142,74 @@ export const settleJob = (shop: string, attemptGid: string, webhookId: string): 
   data: { attemptGid },
 });
 
-/** `key` makes each press its own job. `byMerchant` is what lets it end a chargeback. */
+/**
+ * `key` makes each press its own job. `byMerchant` is what lets it end a chargeback. `savedCard` is
+ * a customer's newly saved card, which gets one try that the customer limits don't hold off.
+ */
 export const resumeJob = (
   shop: string,
   subscriptionId: string,
   key: string,
   byMerchant = false,
+  savedCard = false,
 ): Job => ({
   type: BILLING_RESUME_JOB,
   id: `${BILLING_RESUME_JOB}:${subscriptionId}:${key}`,
   shop,
-  data: { subscriptionId, byMerchant },
+  data: { subscriptionId, byMerchant, savedCard },
 });
+
+/** What a `billing.resume` job does. Both flags must be exactly `true`: nothing else counts. */
+export const runResumeJob = (
+  db: Db,
+  rawDb: D1Database,
+  graphql: Graphql,
+  job: Job,
+  now = new Date(),
+) =>
+  retryCharge(
+    db,
+    rawDb,
+    graphql,
+    String(job.data?.subscriptionId),
+    job.data?.byMerchant === true,
+    now,
+    job.data?.savedCard === true,
+  );
+
+/** A customer saved a card. Whoever it's for is found when the job runs, and may have no problem to fix. */
+export const cardUpdatedJob = (shop: string, customerGid: string, webhookId: string): Job => ({
+  type: CARD_UPDATED_JOB,
+  id: `${CARD_UPDATED_JOB}:${customerGid}:${webhookId}`,
+  shop,
+  data: { customerGid, webhookId },
+});
+
+/**
+ * Updating a card recovers a failed one: every subscription of the customer with a failed payment
+ * gets the same recovery a merchant's Retry charge runs, but not as the merchant, so a chargeback
+ * hold stays until the merchant ends it. A customer with nothing wrong has nothing queued.
+ */
+export async function resumeAfterCardUpdate(
+  db: Db,
+  shop: string,
+  customerGid: string,
+  webhookId: string,
+): Promise<Job[]> {
+  const failing = await db.subscription.findMany({
+    where: {
+      customerGid,
+      shop: { shopDomain: shop },
+      status: { in: ["ACTIVE", "PAUSED"] },
+      paymentProblemSince: { not: null },
+      // A null reason is a card still being retried, so `not` alone would leave it out.
+      OR: [{ pausedReason: null }, { pausedReason: { not: CHARGEBACK } }],
+    },
+    select: { id: true },
+  });
+  // The webhook's ID is the job's, so the same delivery twice is one try.
+  return failing.map(({ id }) => resumeJob(shop, id, webhookId, false, true));
+}
 
 export const disputeJob = (shop: string, orderGid: string, webhookId: string): Job => ({
   type: DISPUTE_JOB,

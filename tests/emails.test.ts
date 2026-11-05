@@ -717,6 +717,8 @@ describe("who can be reached, and when it is still right to send", () => {
 
 // ---- copy ------------------------------------------------------------------------------
 
+const PORTAL = "https://shopify.com/1/account/pages/customer-portal";
+
 describe("copy", () => {
   const shop: ShopCopy = {
     name: "Cake <Zine> & Co",
@@ -731,14 +733,14 @@ describe("copy", () => {
     { kind: "preorderAnnounced", release: "Zine 4", paused: false, ordersNow: false, addressUrl: "https://a.test/l/x", cardUrl: "https://a.test/l/y" },
     { kind: "preorderAnnounced", release: "Zine 4", paused: true, ordersNow: false, addressUrl: "https://a.test/l/x", cardUrl: "https://a.test/l/y" },
     { kind: "preorderAnnounced", release: "Zine 4", paused: false, ordersNow: true, addressUrl: "https://a.test/l/x", cardUrl: "https://a.test/l/y" },
-    { kind: "upcomingCharge", plan: "Yearly", amount: "$40.00", when: { on: new Date("2027-03-01T10:00:00Z"), releases: 2 } },
-    { kind: "upcomingCharge", plan: "Yearly", amount: "$40.00", when: { on: new Date("2027-03-01T10:00:00Z"), releases: 1 } },
-    { kind: "upcomingCharge", plan: "Yearly", amount: "$40.00", when: { release: "Zine 4" } },
-    { kind: "upcomingCharge", plan: "Yearly", amount: "$40.00", when: { held: new Date("2027-03-01T10:00:00Z") } },
+    { kind: "upcomingCharge", plan: "Yearly", amount: "$40.00", portalUrl: PORTAL, when: { on: new Date("2027-03-01T10:00:00Z"), releases: 2 } },
+    { kind: "upcomingCharge", plan: "Yearly", amount: "$40.00", portalUrl: PORTAL, when: { on: new Date("2027-03-01T10:00:00Z"), releases: 1 } },
+    { kind: "upcomingCharge", plan: "Yearly", amount: "$40.00", portalUrl: PORTAL, when: { release: "Zine 4" } },
+    { kind: "upcomingCharge", plan: "Yearly", amount: "$40.00", portalUrl: PORTAL, when: { held: new Date("2027-03-01T10:00:00Z") } },
     { kind: "failedPayment", plan: "Yearly", retryOn: new Date("2026-11-10T10:00:00Z"), cardUrl: "https://a.test/l/y" },
     { kind: "failedPayment", plan: "Yearly", retryOn: null, cardUrl: "https://a.test/l/y" },
     { kind: "lastReleaseShipping", plan: "Yearly", release: "Zine 4" },
-    { kind: "priceChange", plan: "Yearly", oldAmount: "$40.00", newAmount: "$50.00", effectiveAt: new Date("2026-12-04T10:00:00Z") },
+    { kind: "priceChange", plan: "Yearly", oldAmount: "$40.00", newAmount: "$50.00", effectiveAt: new Date("2026-12-04T10:00:00Z"), portalUrl: PORTAL },
   ];
 
   it("uses the shop's release word and name, never a hard-coded one", () => {
@@ -752,6 +754,21 @@ describe("copy", () => {
     expect(renderEmail(shop, all[0]).text).toContain("Each drop ships on its own order");
     expect(renderEmail(shop, all[4]).text).toContain("another 2 drops");
     expect(renderEmail(shop, all[5]).text).toContain("another 1 drop.");
+  });
+
+  it("offers cancelling through the portal link, in the shop's release word, and no longer asks for a reply", () => {
+    const withCancel = all.filter((d) => d.kind === "upcomingCharge" || d.kind === "priceChange");
+    expect(withCancel).toHaveLength(5);
+    for (const data of withCancel) {
+      const { text, html } = renderEmail(shop, data);
+      expect(text, data.kind).not.toMatch(/reply to this email/i);
+      expect(text).toContain(`Turn off auto-renew or cancel: ${PORTAL}`);
+      expect(html).toContain(`href="${PORTAL}"`);
+      expect(html).toContain(">Turn off auto-renew or cancel</a>");
+      expect(text).toContain("The drops you've already paid for still ship.");
+    }
+    // The emails that don't offer it don't carry the link.
+    expect(renderEmail(shop, all[0]).text).not.toContain(PORTAL);
   });
 
   it("escapes everything in the HTML and keeps the subject to one line", () => {
@@ -773,7 +790,7 @@ describe("copy", () => {
   });
 
   it("dates follow the shop's timezone", () => {
-    const late = renderEmail({ ...shop, timezone: "America/Los_Angeles" }, { kind: "upcomingCharge", plan: "P", amount: "$1.00", when: { on: new Date("2027-03-01T02:00:00Z"), releases: 1 } });
+    const late = renderEmail({ ...shop, timezone: "America/Los_Angeles" }, { kind: "upcomingCharge", plan: "P", amount: "$1.00", portalUrl: PORTAL, when: { on: new Date("2027-03-01T02:00:00Z"), releases: 1 } });
     expect(late.subject).toBe("Your P renews on February 28, 2027");
   });
 });

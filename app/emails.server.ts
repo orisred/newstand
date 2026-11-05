@@ -1,5 +1,5 @@
 import type { createDb } from "./db.server";
-import { linkUrl } from "./email-link.server";
+import { linkUrl, portalUrl } from "./email-link.server";
 import {
   EmailError,
   RATE_LIMITED,
@@ -358,6 +358,8 @@ type SendContext = {
   /** The contracts' delivery prices, in cents, by contract ID. */
   shipping: Map<string, number>;
   ordersNow: boolean;
+  /** The customer account's portal page, for the emails that offer to cancel. */
+  portalUrl: string;
   now: Date;
 };
 
@@ -390,6 +392,7 @@ async function dataFor(row: Row, ctx: SendContext): Promise<EmailData> {
           kind: "upcomingCharge",
           plan: row.displayName,
           amount: money(row, chargeCents(row, change, now), shipping),
+          portalUrl: ctx.portalUrl,
           when: { release: release(value) },
         };
       }
@@ -398,6 +401,7 @@ async function dataFor(row: Row, ctx: SendContext): Promise<EmailData> {
         kind: "upcomingCharge",
         plan: row.displayName,
         amount: money(row, chargeCents(row, change, termEnd), shipping),
+        portalUrl: ctx.portalUrl,
         when: type === "late" ? { held: termEnd } : { on: termEnd, releases: row.releasesPerTerm },
       };
     }
@@ -424,6 +428,7 @@ async function dataFor(row: Row, ctx: SendContext): Promise<EmailData> {
         oldAmount: money(row, row.lockedPriceCents ?? row.priceCents, shipping),
         newAmount: money(row, change.newPriceCents, shipping),
         effectiveAt: change.effectiveAt,
+        portalUrl: ctx.portalUrl,
       };
     }
   }
@@ -431,6 +436,7 @@ async function dataFor(row: Row, ctx: SendContext): Promise<EmailData> {
 
 type ShopifyShop = {
   name?: string;
+  id?: string;
   primaryDomain?: { url?: string };
   billingAddress?: Record<string, string | null> | null;
 };
@@ -438,6 +444,7 @@ type ShopifyShop = {
 const CONTEXT = `#graphql
   query EmailContext($ids: [ID!]!) {
     shop {
+      id
       name
       contactEmail
       primaryDomain { url }
@@ -625,6 +632,7 @@ export async function runEmailSlice(
     deliveries: new Map(deliveries.map((delivery) => [delivery.id, delivery.release.title])),
     shipping: new Map<string, number>(),
     ordersNow: shop.orderTiming === "PREORDER_OPENS",
+    portalUrl: "",
     now: started,
   };
 
@@ -671,6 +679,7 @@ export async function runEmailSlice(
       ),
     );
     const copy = copyOf(shop, data.shop);
+    ctx.portalUrl = portalUrl(data.shop.id, shop.shopDomain);
     const replyTo = data.shop.contactEmail ?? undefined;
 
     for (const row of due) {
