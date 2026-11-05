@@ -97,10 +97,15 @@ module.exports = {
         node: true,
       },
     },
-    // The customer account extension is Preact JSX without prop types.
+    // The customer account extension is Preact JSX without prop types. pnpm doesn't install its
+    // packages from the root, because it ignores package.json workspaces, so its imports can't resolve there.
     {
       files: ["extensions/customer-portal/**/*.{js,jsx,ts}"],
-      rules: { "react/prop-types": "off", "@typescript-eslint/ban-ts-comment": "off" },
+      rules: {
+        "react/prop-types": "off",
+        "@typescript-eslint/ban-ts-comment": "off",
+        "import/no-unresolved": "off",
+      },
     },
   ],
   globals: {
