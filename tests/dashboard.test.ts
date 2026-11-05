@@ -493,6 +493,49 @@ describe("hourly refresh", () => {
     expect(queries.filter((q) => !q.includes("DashboardStock"))).toEqual([]);
   });
 
+  it("contracts and orders Shopify doesn't return don't hold up the older ones it does", async () => {
+    const t = await setup();
+    const long = new Date(NOW.getTime() - 400 * 86_400_000);
+    const readableSub = await t.subscribe(t.bundle.id, { createdAt: long });
+    const gone = new Set<string>();
+    for (let i = 0; i < 60; i++) gone.add((await t.subscribe(t.bundle.id)).contractGid!);
+    const release = await db().release.create({ data: { shopId: t.shop.id, number: 1, title: "R", status: "SHIPPED" } });
+    const attempt = (i: number, createdAt?: Date) =>
+      db().billingAttempt.create({
+        data: {
+          subscriptionId: readableSub.id,
+          chargeFor: release.id,
+          idempotencyKey: `gone-${t.shop.id}-${i}`,
+          attempt: i + 1,
+          result: "SUCCEEDED",
+          orderGid: `gid://shopify/Order/gone-${t.shop.id}-${i}`,
+          ...(createdAt ? { createdAt } : {}),
+        },
+      });
+    const readable = await attempt(0, long);
+    for (let i = 1; i <= 60; i++) await attempt(i);
+    const graphql = async (query: string, variables: any) => {
+      if (query.includes("DashboardOrders")) {
+        return {
+          nodes: variables.ids.map((id: string) =>
+            id === readable.orderGid ? { id, currentSubtotalPriceSet: { shopMoney: { amount: "9.00" } } } : null,
+          ),
+        };
+      }
+      if (query.includes("DashboardContracts")) {
+        return {
+          nodes: variables.ids.map((id: string) =>
+            gone.has(id) ? null : { id, ...contract(["plan/A"], [item("plan/A", "40.00")]) },
+          ),
+        };
+      }
+      return { nodes: [] };
+    };
+    await refreshDashboard(db(), env.DB, graphql as any, t.shop.shopDomain, NOW);
+    expect((await db().subscription.findUniqueOrThrow({ where: { id: readableSub.id } })).signupCents).toBe(4000);
+    expect((await db().billingAttempt.findUniqueOrThrow({ where: { id: readable.id } })).amountCents).toBe(900);
+  });
+
   it("counts only the contract's own line when the checkout also held a one-time product", () => {
     const order = [item("plan/A", "40.00"), item(null, "12.00")];
     expect(signupAmountCents(contract(["plan/A"], order))).toBe(4000);

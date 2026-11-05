@@ -13,7 +13,7 @@ import {
 } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
-import { resumeJob } from "../billing.server";
+import { DOUBLE_CHARGE_EVENT, resumeJob } from "../billing.server";
 import {
   customerLabel,
   customerNames,
@@ -33,6 +33,7 @@ import {
 import { formatZoned, zonedFields, zonedToUtc } from "../release-dates";
 import {
   createRelease,
+  FLAGS,
   moveRelease,
   parseQuantity,
   parseTitle,
@@ -43,8 +44,13 @@ import {
 } from "../releases.server";
 import { getOrCreateShop } from "../shop.server";
 import { authenticate } from "../shopify.server";
+import { DATA_REQUEST_EVENT, dataRequestHandedOver } from "../gdpr.server";
 import { GIFT_INVALID_EVENT } from "../gifts.server";
-import { MIXED_HANDLED_EVENT, MIXED_PLANS_EVENT } from "../subscriptions.server";
+import {
+  MIXED_HANDLED_EVENT,
+  SIGNUP_DEAD_EVENT,
+  signupRetryJob,
+} from "../subscriptions.server";
 
 const TIMEZONE = `#graphql
   query ShopTimezone { shop { ianaTimezone } }`;
@@ -113,22 +119,36 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         paused: row.status === "PAUSED",
         // Shopify's code, in lower case: it's specific, and there are too many to word by hand.
         error: last?.errorCode?.replaceAll("_", " ").toLowerCase() ?? null,
+        challenged: last?.errorCode === "ACTION_REQUIRED",
         tries: last?.attempt ?? 0,
         nextTry: last?.nextRetryAt && formatZoned(last.nextRetryAt, timezone),
       };
     }),
     morePaymentProblems: problems.more,
     mixed: mixed.map(({ id, type, payload }) => {
-      const { orderGid, orderName } = payload as {
+      const { orderGid, orderName, contractGid, customerGid } = payload as {
         orderGid?: string;
         orderName?: string;
+        contractGid?: string;
+        customerGid?: string;
       };
-      const orderId = String(orderGid).split("/").pop();
+      const orderId = orderGid?.split("/").pop();
       return {
         id,
-        gift: type === GIFT_INVALID_EVENT,
+        kind:
+          type === DOUBLE_CHARGE_EVENT
+            ? ("double" as const)
+            : type === SIGNUP_DEAD_EVENT
+              ? ("dead" as const)
+              : type === GIFT_INVALID_EVENT
+                ? ("gift" as const)
+                : type === DATA_REQUEST_EVENT
+                  ? ("data" as const)
+                  : ("mixed" as const),
         orderId,
         orderName: orderName ?? `Order ${orderId}`,
+        contractId: contractGid?.split("/").pop(),
+        customerId: customerGid?.split("/").pop(),
       };
     }),
     // One-time token for the create form: a double submit carries the same one.
@@ -185,17 +205,33 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   }
 
   if (intent === "mixedHandled") {
-    const { count } = await db.event.updateMany({
-      where: {
-        id: String(form.get("eventId")),
-        shopId: shop.id,
-        type: { in: [MIXED_PLANS_EVENT, GIFT_INVALID_EVENT] },
-      },
-      data: { type: MIXED_HANDLED_EVENT },
-    });
+    const eventId = String(form.get("eventId"));
+    const done =
+      (await dataRequestHandedOver(db, shop.id, eventId)) ||
+      (
+        await db.event.updateMany({
+          where: { id: eventId, shopId: shop.id, type: { in: [...FLAGS] } },
+          data: { type: MIXED_HANDLED_EVENT },
+        })
+      ).count === 1;
     return {
-      ok: count === 1,
-      message: count === 1 ? "Marked as handled." : "That sign-up was already handled.",
+      ok: done,
+      message: done ? "Marked as handled." : "That was already handled.",
+    } satisfies ActionData;
+  }
+
+  if (intent === "retrySignup") {
+    const job = await signupRetryJob(
+      db,
+      { ...shop, shopDomain: session.shop },
+      String(form.get("eventId")),
+    );
+    if (job) await enqueueJobs(env, [job]);
+    return {
+      ok: Boolean(job),
+      message: job
+        ? "Trying again. If it works, this goes away in a moment."
+        : "That was already handled.",
     } satisfies ActionData;
   }
 
@@ -412,6 +448,19 @@ export default function Releases() {
     URL.revokeObjectURL(link.href);
   };
 
+  const downloadDataRequest = async (id: string) => {
+    const response = await fetch(`/app/data-request/${encodeURIComponent(id)}`);
+    if (!response.ok) {
+      shopify.toast.show("The download didn't work. Try again.", { isError: true });
+      return;
+    }
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(await response.blob());
+    link.download = "customer-data-request.json";
+    link.click();
+    URL.revokeObjectURL(link.href);
+  };
+
   const pickProduct = async (releaseId: string) => {
     // The product picker, because the variant picker shows a one-variant product with no name.
     const selected = await shopify.resourcePicker({
@@ -449,32 +498,73 @@ export default function Releases() {
     <s-page heading={heading}>
       {[
         {
-          gift: false,
+          kind: "double",
+          heading: "A customer was charged twice: refund this order",
+          text: "A bank's challenge was completed after another try had already paid, so one charge was paid twice. The app counted only the first. Refund this order in Shopify, then mark it as handled.",
+        },
+        {
+          kind: "dead",
+          heading: "A sign-up didn't finish: a customer has paid and has nothing yet",
+          text: "The app kept failing to set up this contract, so it has no subscription and nothing will ship. Try again. If it still fails, contact support with the contract number.",
+        },
+        {
+          kind: "mixed",
           heading: "A sign-up needs you: one contract holds more than one plan",
           text: "Shopify put two plans on one subscription contract, and a contract is charged as a whole, so the app can't charge them separately. No subscription was created and the order stays unfulfilled. Refund it and ask the customer to buy each plan separately.",
         },
         {
-          gift: true,
+          kind: "gift",
           heading: "A gift needs you: its recipient couldn't be used",
-          text: "The buyer paid for a gift, but the recipient's email was missing, invalid, refused by Shopify, or the gift sat in a cart with other subscriptions. No subscription was created, so nothing will ship or be charged, and the order stays unfulfilled. Contact the buyer, then refund the order or cancel its subscription contract in Shopify.",
+          text: "The buyer paid for a gift, but the recipient's email was missing, invalid or refused by Shopify, the gift sat in a cart with other subscriptions, or its plan isn't sold as a gift. No subscription was created, so nothing will ship or be charged, and the order stays unfulfilled. If you've fixed the cause, such as creating the customer in Shopify or making the plan giftable, try again. Otherwise contact the buyer, then refund the order or cancel its subscription contract in Shopify.",
         },
-      ].map(({ gift, heading: title, text }) => {
-        const rows = mixed.filter((row) => row.gift === gift);
+        {
+          kind: "data",
+          heading: "A customer asked for their data",
+          text: "Shopify passed on a customer's request for the data this app holds on them. Download the file and send it to the customer, within 30 days of the request. Once you've sent it, mark it as handed over, and the copy here is deleted.",
+        },
+      ].map(({ kind, heading: title, text }) => {
+        const rows = mixed.filter((row) => row.kind === kind);
         return (
           rows.length > 0 && (
             <s-banner key={title} tone="critical" heading={title}>
               <s-stack gap="base">
                 <s-paragraph>{text}</s-paragraph>
-                {rows.map(({ id, orderId, orderName }) => (
+                {rows.map(({ id, orderId, orderName, contractId, customerId }) => (
                   <s-stack
                     key={id}
                     direction="inline"
                     gap="base"
                     alignItems="center"
                   >
-                    <s-link href={`shopify://admin/orders/${orderId}`}>
-                      {orderName}
-                    </s-link>
+                    {orderId && (
+                      <s-link href={`shopify://admin/orders/${orderId}`}>
+                        {orderName}
+                      </s-link>
+                    )}
+                    {!orderId && contractId && <s-text>Contract {contractId}</s-text>}
+                    {customerId && (
+                      <s-link href={`shopify://admin/customers/${customerId}`}>
+                        Customer {customerId}
+                      </s-link>
+                    )}
+                    {kind === "data" && (
+                      <s-button onClick={() => downloadDataRequest(id)}>
+                        Download
+                      </s-button>
+                    )}
+                    {(kind === "gift" || kind === "dead") && contractId && (
+                      <s-button
+                        {...(busy ? { disabled: true } : {})}
+                        onClick={() =>
+                          fetcher.submit(
+                            { intent: "retrySignup", eventId: id },
+                            { method: "POST" },
+                          )
+                        }
+                      >
+                        Try again
+                      </s-button>
+                    )}
                     <s-button
                       {...(busy ? { disabled: true } : {})}
                       onClick={() =>
@@ -484,7 +574,7 @@ export default function Releases() {
                         )
                       }
                     >
-                      Mark as handled
+                      {kind === "data" ? "Handed over" : "Mark as handled"}
                     </s-button>
                   </s-stack>
                 ))}
@@ -586,6 +676,13 @@ export default function Releases() {
                 )}
                 {problem.nextTry && (
                   <s-text color="subdued">Next try {problem.nextTry}</s-text>
+                )}
+                {problem.challenged && !problem.chargeback && (
+                  <s-text color="subdued">
+                    Their bank asked them to confirm. While that can still be
+                    completed, Retry charge won&apos;t charge, because both would
+                    go through. A new card can.
+                  </s-text>
                 )}
                 <s-button
                   {...(busy ? { disabled: true } : {})}

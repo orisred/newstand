@@ -4,6 +4,7 @@ import { createDb } from "../db.server";
 import { portalUrl, verifyLinkToken } from "../email-link.server";
 import { graphqlOf } from "../plan-sync.server";
 import { confirmAddress, portalCopy, upcomingFor } from "../portal.server";
+import { linkLimited } from "../rate-limit.server";
 import { unauthenticated } from "../shopify.server";
 
 // The token is in the URL, so keep it out of caches and referrers.
@@ -98,11 +99,17 @@ export const loader = async ({ params, context }: LoaderFunctionArgs) => {
   };
 };
 
-export const action = async ({ params, context }: ActionFunctionArgs) => {
+export const action = async ({ params, context, request }: ActionFunctionArgs) => {
   const env = context.cloudflare.env;
   const found = await load(env, String(params.token));
   if (!found || found.link.k !== "address" || !found.link.r)
     return { done: false };
+  // Counted per place it's pressed from: a forwarded link can't use up the customer's own presses, and
+  // signing in to confirm is always there.
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  if (await linkLimited(env.DB, found.subscription.id, ip)) {
+    return { done: false, limited: true };
+  }
   const done = await confirmAddress(
     found.db,
     env.DB,
@@ -144,6 +151,11 @@ export default function EmailLink() {
           {data.title ? <p>{data.title}</p> : null}
           {confirmed ? (
             <p>Thanks, your delivery address is confirmed.</p>
+          ) : result && "limited" in result ? (
+            <p>
+              That&apos;s a lot of tries. Please wait a while, or sign in to
+              confirm your address instead.
+            </p>
           ) : data.confirmable ? (
             <>
               <p>

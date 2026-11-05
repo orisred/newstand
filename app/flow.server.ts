@@ -94,7 +94,7 @@ async function recordLastReleaseEvents(rawDb: D1Database, shopId: string, now: D
 /**
  * Sends a shop's new events to Flow, each once. An event is claimed (`sentToFlowAt`) before it's
  * sent, so a repeat of the job never sends it twice. If Flow can't be reached, the claim is given
- * back and the next tick tries again. If the Worker dies between the claim and the answer, that one
+ * back and the next tick tries again, with no next slice until then. If the Worker dies between the claim and the answer, that one
  * trigger is lost: Flow has no way to ask whether it arrived, and running a workflow twice (a second
  * email from Klaviyo, say) was judged worse than missing one.
  * Returns the next slice if the page was full.
@@ -128,6 +128,7 @@ export async function runFlowSlice(
     .all<FlowEvent>();
 
   let sent = 0;
+  let unreachable = false;
   const graphql = results.length ? await graphqlFor() : null;
   for (const event of results) {
     const claimed = await rawDb
@@ -152,10 +153,13 @@ export async function runFlowSlice(
         .bind(event.id)
         .run();
       logEvent("error", "flow.send_failed", { eventId: event.id, ...describeError(error) });
+      // Whatever stopped this stops the rest, and a chain would come straight back to the same events.
+      unreachable = true;
+      break;
     }
   }
   logEvent("info", "flow.slice", { shopId: shop.id, sent, found: results.length });
-  return results.length === EVENTS_PER_SLICE
+  return results.length === EVENTS_PER_SLICE && !unreachable
     ? { delaySeconds: 0, job: flowJob(String(job.shop), crypto.randomUUID()) }
     : null;
 }

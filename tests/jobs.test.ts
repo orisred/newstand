@@ -20,6 +20,9 @@ import {
   type JobHandler,
 } from "../app/jobs/runner.server";
 import { logEvent } from "../app/logger.server";
+import { createDb } from "../app/db.server";
+import { getOrCreateShop } from "../app/shop.server";
+import { contractJob, SIGNUP_DEAD_EVENT } from "../app/subscriptions.server";
 
 beforeAll(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
@@ -330,6 +333,44 @@ describe("a job that exhausts its retries", () => {
       status: "DEAD",
       body: '"junk"',
     });
+  });
+
+  it("flags a sign-up whose contract job went dead, and not one that has its subscription since", async () => {
+    const shopDomain = `dead${crypto.randomUUID()}.myshopify.com`;
+    const shop = await getOrCreateShop(createDb(env.DB), shopDomain);
+    const dead = (contractGid: string, id: string) =>
+      captureLogs(() =>
+        consumeDeadJobs(
+          createMessageBatch<unknown>(`${QUEUE}-dlq`, [
+            { id, timestamp: new Date(), attempts: 1, body: contractJob(shopDomain, contractGid, id) },
+          ]),
+          env,
+        ),
+      );
+    await dead("gid://shopify/SubscriptionContract/901", "dead-c1");
+    const flags = () => createDb(env.DB).event.findMany({ where: { shopId: shop.id, type: SIGNUP_DEAD_EVENT } });
+    expect(await flags()).toHaveLength(1);
+    expect((await flags())[0].payload).toMatchObject({ contractGid: "gid://shopify/SubscriptionContract/901" });
+
+    // A flag handled by mistake comes back if the job goes dead again.
+    await createDb(env.DB).event.updateMany({ where: { shopId: shop.id }, data: { type: "contract.mixed_plans.handled" } });
+    await dead("gid://shopify/SubscriptionContract/901", "dead-c2");
+    expect(await flags()).toHaveLength(1);
+
+    const plan = await createDb(env.DB).plan.create({
+      data: { shopId: shop.id, name: "P", displayName: "P", priceCents: 100 },
+    });
+    await createDb(env.DB).subscription.create({
+      data: {
+        shopId: shop.id,
+        planId: plan.id,
+        contractGid: "gid://shopify/SubscriptionContract/902",
+        customerGid: "gid://shopify/Customer/1",
+        releasesRemaining: 1,
+      },
+    });
+    await dead("gid://shopify/SubscriptionContract/902", "dead-c3");
+    expect(await flags()).toHaveLength(1);
   });
 
   it("doesn't mark a job dead when another copy already finished it", async () => {

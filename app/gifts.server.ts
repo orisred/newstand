@@ -36,7 +36,7 @@ export type GiftDetails = {
 export type ParsedGift =
   | { kind: "none" }
   | { kind: "gift"; gift: GiftDetails }
-  | { kind: "invalid"; reason: "no_email" | "bad_email" | "several_lines" };
+  | { kind: "invalid"; reason: "no_email" | "bad_email" | "several_lines" | "plan_not_giftable" };
 
 type Attribute = { key: string; value: string | null };
 

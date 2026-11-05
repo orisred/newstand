@@ -677,6 +677,23 @@ describe("the product a plan is attached to", () => {
     ).toBe(true);
   });
 
+  it("a sync dying right after it removes a plan doesn't leave the product unbuyable", async () => {
+    const { shop, id } = await newPlan();
+    const shopify = fakeShopify();
+    await syncPlan(db(), shopify.graphql, shop.id, id);
+    await setPlanActive(db(), shop.id, id, false);
+    shopify.hooks.after = {
+      PlanGroupRemoveProducts: () => {
+        shopify.hooks.after = {};
+        throw new Error("crashed");
+      },
+    };
+    await expect(syncPlan(db(), shopify.graphql, shop.id, id)).rejects.toThrow("crashed");
+    await syncPlan(db(), shopify.graphql, shop.id, id, new Date(Date.now() + 10 * 60 * 1000));
+    expect([...shopify.groups.values()][0].products.nodes).toEqual([]);
+    expect(shopify.products.get(product)?.requiresSellingPlan).toBe(false);
+  });
+
   it("reports a variant that doesn't ship, because checkout wouldn't ask for an address", async () => {
     const { shop, id } = await newPlan();
     const shopify = fakeShopify();

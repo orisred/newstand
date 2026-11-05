@@ -495,7 +495,8 @@ export async function changeAddress(
   input: unknown,
   now = new Date(),
 ) {
-  if (subscription.status === "CANCELLED") {
+  // Paid releases still ship after a cancellation, to the address on the contract when each order is created.
+  if (subscription.status === "CANCELLED" && subscription.releasesRemaining <= 0) {
     throw new PortalError("cancelled", "This subscription is cancelled.");
   }
   const address = cleanAddress(input, subscription.shop.allowedCountries);

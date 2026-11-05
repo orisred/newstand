@@ -14,7 +14,7 @@ import {
 } from "../app/gifts.server";
 import { parsePlan } from "../app/plans.server";
 import { getOrCreateShop } from "../app/shop.server";
-import { syncContract } from "../app/subscriptions.server";
+import { CONTRACT_JOB, signupRetryJob, syncContract } from "../app/subscriptions.server";
 
 beforeAll(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
@@ -239,15 +239,43 @@ describe("a gift becomes the recipient's subscription", () => {
     expect(shopify.state.creates).toBe(0);
   });
 
-  it("is a gift only on a giftable prepaid bundle; elsewhere the details are ignored and it's the buyer's own", async () => {
+  it("is a gift only on a giftable prepaid bundle; gift details anywhere else are flagged, not made the buyer's own", async () => {
     for (const plan of [{ giftable: false }, { billingMode: "PER_RELEASE", releasesPerTerm: 1, termMonths: null }]) {
       const { shop, sellingPlanGid } = await setup(plan);
       const read = contractFor(sellingPlanGid, null);
       const shopify = fakeShopify(read);
       await syncContract(db(), env.DB, shopify.graphql, shop, read.id);
-      expect(await subscriptionOf(read.id)).toMatchObject({ source: "NEW", customerGid: BUYER, giftBuyerGid: null });
+      expect(await subscriptionOf(read.id)).toBeNull();
       expect(shopify.state.creates + shopify.state.searches).toBe(0);
+      const [flag] = await flags(shop.id);
+      expect(flag.payload).toMatchObject({ contractGid: read.id, reason: "plan_not_giftable" });
     }
+  });
+
+  it("a flagged gift can be tried again, and the flag goes once it becomes a subscription", async () => {
+    const { shop, plan, sellingPlanGid } = await setup({ giftable: false });
+    const read = contractFor(sellingPlanGid, null);
+    const shopify = fakeShopify(read);
+    await syncContract(db(), env.DB, shopify.graphql, shop, read.id);
+    const [flag] = await flags(shop.id);
+
+    expect(await signupRetryJob(db(), shop, flag.id)).toMatchObject({
+      type: CONTRACT_JOB,
+      data: { contractGid: read.id },
+    });
+    // Another shop's flag, or an unknown one, does nothing.
+    expect(await signupRetryJob(db(), { ...shop, id: "other" }, flag.id)).toBeNull();
+    expect(await signupRetryJob(db(), shop, "nope")).toBeNull();
+
+    // Still not fixed: the flag stays, and there is still one.
+    await syncContract(db(), env.DB, shopify.graphql, shop, read.id);
+    expect(await flags(shop.id)).toHaveLength(1);
+
+    // The merchant turns gifts back on: the retry makes the recipient's subscription.
+    await db().plan.update({ where: { id: plan.id }, data: { giftable: true } });
+    await syncContract(db(), env.DB, shopify.graphql, shop, read.id);
+    expect(await subscriptionOf(read.id)).toMatchObject({ source: "GIFT" });
+    expect(await flags(shop.id)).toHaveLength(0);
   });
 
   it("an ordinary purchase of a giftable plan stays the buyer's", async () => {

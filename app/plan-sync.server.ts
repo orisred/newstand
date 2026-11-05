@@ -329,8 +329,10 @@ async function run(
  * Keeps the product from being bought outside a plan, and says when it can't ship.
  * - A product with plans must require one, or a one-time purchase makes an order with no
  *   subscription behind it. Set when a plan is attached.
- * - A product that has lost its last selling plan group goes back to selling normally,
- *   because one that requires a plan and has none can't be bought at all.
+ * - A product losing its last selling plan group goes back to selling normally, because one that
+ *   requires a plan and has none can't be bought at all. This runs just before the group comes off, so
+ *   it still counts that group, and so a sync dying between the two leaves a product that can be bought:
+ *   its retry still sees the plan on it, which it wouldn't if the plan had already come off.
  * - The subscription item must be shippable so checkout always asks for an address; a variant
  *   that isn't is reported as a difference, since the app can't fix it without changing stock.
  */
@@ -354,7 +356,7 @@ async function settleProducts(
   for (const product of nodes) {
     if (!product) continue;
     const isAttached = attached.includes(product.id);
-    const wantRequired = isAttached || product.sellingPlanGroupsCount.count > 0;
+    const wantRequired = isAttached || product.sellingPlanGroupsCount.count > 1;
     if (product.requiresSellingPlan !== wantRequired) {
       await run(
         graphql,
@@ -529,6 +531,7 @@ export async function syncPlan(
       extra = attached.filter((id) => !wanted.includes(id));
       const missing = wanted.filter((id) => !attached.includes(id));
       if (extra.length > 0) {
+        await settleProducts(graphql, [], extra);
         await run(
           graphql,
           REMOVE_PRODUCTS,
@@ -546,7 +549,7 @@ export async function syncPlan(
       }
     }
 
-    const productIssues = await settleProducts(graphql, wanted, extra);
+    const productIssues = await settleProducts(graphql, wanted, []);
 
     const back = await graphql(FIND_GROUP, { id: groupId });
     const group = back.sellingPlanGroup as ShopifyGroup | null;

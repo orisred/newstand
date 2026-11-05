@@ -211,6 +211,24 @@ async function tags(s: Setup, graphql: any) {
 const tagged = async (s: Setup) =>
   Object.fromEntries((await db().memberTag.findMany({ where: { shopId: s.shop.id } })).map((row) => [row.customerGid, row.tag]));
 
+describe("Flow while Shopify is down", () => {
+  it("stops at the first failure and leaves the rest for the next tick, rather than chaining at once", async () => {
+    const s = await setupShop();
+    for (let i = 0; i < 26; i++) {
+      const sub = await subscribe(s);
+      await event(s, sub.id, STARTED_EVENT);
+    }
+    let calls = 0;
+    const down = async () => {
+      calls++;
+      throw new Error("Admin API returned errors");
+    };
+    expect(await runFlow(s, down)).toBeNull();
+    expect(calls).toBe(1);
+    expect(await db().event.count({ where: { shopId: s.shop.id, sentToFlowAt: { not: null } } })).toBe(0);
+  });
+});
+
 describe("the member discount tag", () => {
   it("is added for an active subscriber, once, and a repeat does nothing", async () => {
     const s = await setupShop();
@@ -237,6 +255,59 @@ describe("the member discount tag", () => {
     expect((await tagged(s))[sub.customerGid]).toBeNull();
     await tags(s, shopify.graphql);
     expect(shopify.calls).toHaveLength(1);
+  });
+
+  it("on a plan without auto-renew it stays until the term is up, not past it (N, 2026-11-05)", async () => {
+    const s = await setupShop({ autoRenew: false });
+    const running = await subscribe(s, { releasesRemaining: 0, termEndsAt: ago(-10) });
+    const over = await subscribe(s, { releasesRemaining: 0, termEndsAt: ago(1) });
+    const owed = await subscribe(s, { releasesRemaining: 1, termEndsAt: ago(1) });
+    const shopify = tagShopify();
+    await tags(s, shopify.graphql);
+    const now = await tagged(s);
+    expect(now[running.customerGid]).toBe("active-subscriber");
+    expect(now[over.customerGid]).toBeUndefined();
+    // Still owed a paid release, like a cancelled subscriber: it goes with that release's order.
+    expect(now[owed.customerGid]).toBe("active-subscriber");
+
+    // The hour the term ends, the tick takes it off, with no one pressing anything.
+    await db().subscription.update({ where: { id: running.id }, data: { termEndsAt: ago(0.01) } });
+    await tags(s, shopify.graphql);
+    expect((await tagged(s))[running.customerGid]).toBeNull();
+  });
+
+  it("on an import hold with nothing left it stays while the term runs, and goes when it's over (N, 2026-11-05)", async () => {
+    const s = await setupShop();
+    const hold = { status: "PAUSED", pausedReason: "IMPORT_HOLD", releasesRemaining: 0 };
+    const running = await subscribe(s, { ...hold, termEndsAt: ago(-10) });
+    const over = await subscribe(s, { ...hold, termEndsAt: ago(1) });
+    const noTerm = await subscribe(s, { ...hold, termEndsAt: null });
+    const failed = await subscribe(s, { ...hold, pausedReason: "FAILED_PAYMENT", termEndsAt: ago(-10) });
+    const shopify = tagShopify();
+    await tags(s, shopify.graphql);
+    const now = await tagged(s);
+    expect(now[running.customerGid]).toBe("active-subscriber");
+    expect(now[over.customerGid]).toBeUndefined();
+    expect(now[noTerm.customerGid]).toBeUndefined();
+    expect(now[failed.customerGid]).toBeUndefined();
+
+    await db().subscription.update({ where: { id: running.id }, data: { termEndsAt: ago(0.01) } });
+    await tags(s, shopify.graphql);
+    expect((await tagged(s))[running.customerGid]).toBeNull();
+  });
+
+  it("a per-release plan without auto-renew has no term, so it goes with the last paid release", async () => {
+    const s = await setupShop({ autoRenew: false, billingMode: "PER_RELEASE", termMonths: null, releasesPerTerm: 1 });
+    const sub = await subscribe(s, { releasesRemaining: 0, termEndsAt: null });
+    await tags(s, tagShopify().graphql);
+    expect((await tagged(s))[sub.customerGid]).toBeUndefined();
+  });
+
+  it("is kept with auto-renew on, past the term date, while the renewal is due", async () => {
+    const s = await setupShop();
+    const sub = await subscribe(s, { releasesRemaining: 0, termEndsAt: ago(1) });
+    await tags(s, tagShopify().graphql);
+    expect((await tagged(s))[sub.customerGid]).toBe("active-subscriber");
   });
 
   it("isn't removed while another of the customer's subscriptions still qualifies", async () => {

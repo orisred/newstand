@@ -4,6 +4,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
   BILLING_RESUME_JOB,
+  DOUBLE_CHARGE_EVENT,
   findLostResults,
   findRenewals,
   findRetries,
@@ -21,6 +22,7 @@ import {
 } from "../app/billing.server";
 import { createDb } from "../app/db.server";
 import type {
+  EmailStatus,
   OrderTiming,
   PriceChangePolicy,
   ReleaseStatus,
@@ -45,6 +47,7 @@ import {
   listPaymentProblems,
   listRunProgress,
   moveRelease,
+  releasesPageData,
 } from "../app/releases.server";
 import { action as disputeWebhook } from "../app/routes/webhooks.disputes";
 import { action as billingWebhook } from "../app/routes/webhooks.subscription_billing_attempts";
@@ -312,6 +315,7 @@ async function newSubscriber(
   shopify.contracts.set(contractGid, {
     status: contractStatus,
     deliveryPrice: { amount: deliveryPrice },
+    deliveryMethod: { address: { address1: "1 Test St" } },
     lines: {
       nodes: [
         {
@@ -1123,16 +1127,193 @@ describe("a failed card", () => {
     expect((await deliveryOf(subscriber.id, release.id))?.status).toBe("PENDING");
   });
 
-  it("the merchant's retry, and a customer's once the challenge is old, still go through", async () => {
+  it("while Shopify says a challenge is open, neither a merchant's press nor a customer's goes through, however old it is", async () => {
     const { shopify, subscriber } = await failing("ACTION_REQUIRED");
     shopify.state.decline = null;
     await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, true, NOW);
-    expect(await attemptsOf(subscriber.id)).toHaveLength(2);
+    expect(await attemptsOf(subscriber.id)).toHaveLength(1);
+    await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, false, days(40));
+    expect(await attemptsOf(subscriber.id)).toHaveLength(1);
+    expect(shopify.charges()).toHaveLength(0);
+  });
 
-    const old = await failing("ACTION_REQUIRED");
-    old.shopify.state.decline = null;
-    await retryCharge(db(), env.DB, old.shopify.graphql, old.subscriber.id, false, days(4));
-    expect(await attemptsOf(old.subscriber.id)).toHaveLength(2);
+  it("once Shopify says a challenge has expired, a merchant's press and a customer's go through", async () => {
+    for (const byMerchant of [true, false]) {
+      const { shopify, subscriber } = await failing("ACTION_REQUIRED");
+      shopify.state.decline = null;
+      [...shopify.attempts.values()][0].state = {
+        __typename: "SubscriptionBillingAttemptFailedState",
+        error: { __typename: "x", code: "EXPIRED_BUYER_ACTION" },
+      };
+      await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, byMerchant, NOW);
+      expect(await attemptsOf(subscriber.id)).toHaveLength(2);
+    }
+  });
+
+  it("asks Shopify first: a challenge completed with its webhook lost is credited, and no one is charged again", async () => {
+    const presses: [boolean, Date, boolean][] = [
+      [true, NOW, false], // a merchant's press
+      [false, days(4), false], // a customer's, after the old 3-day wait
+      [false, NOW, true], // a newly saved card
+    ];
+    for (const [byMerchant, at, savedCard] of presses) {
+      const { shopify, subscriber } = await failing("ACTION_REQUIRED");
+      shopify.state.decline = null;
+      shopify.finish([...shopify.attempts.values()][0]);
+      const jobs = await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, byMerchant, at, savedCard);
+      expect(await attemptsOf(subscriber.id)).toHaveLength(1);
+      expect(shopify.charges()).toHaveLength(1);
+      expect(await row(subscriber.id)).toMatchObject({ status: "ACTIVE", releasesRemaining: 1, paymentProblemSince: null });
+      expect(jobs.some((job) => job.type === PAYMENT_ORDER_JOB)).toBe(true);
+    }
+  });
+
+  it("a scheduled retry asks too: a completed challenge is credited, and an open one holds it off", async () => {
+    const { shopify, subscriber, release } = await failing("ACTION_REQUIRED");
+    const [challenged] = await attemptsOf(subscriber.id);
+    // A later soft failure, with its retry scheduled, on the same charge.
+    const later = await db().billingAttempt.create({
+      data: {
+        subscriptionId: subscriber.id,
+        chargeFor: release.id,
+        idempotencyKey: billingAttemptKey(subscriber.id, release.id, 2),
+        attempt: 2,
+        result: "FAILED",
+        errorCode: "INSUFFICIENT_FUNDS",
+        nextRetryAt: NOW,
+      },
+    });
+    await db().subscription.update({ where: { id: subscriber.id }, data: { status: "ACTIVE", pausedReason: null } });
+    shopify.state.decline = null;
+    expect(await retryDue(db(), env.DB, shopify.graphql, later.id, NOW)).toEqual([]);
+    expect(await attemptsOf(subscriber.id)).toHaveLength(2);
+    expect((await db().billingAttempt.findUniqueOrThrow({ where: { id: later.id } })).nextRetryAt).not.toBeNull();
+
+    shopify.finish([...shopify.attempts.values()].find((a) => a.key === challenged.idempotencyKey)!);
+    const jobs = await retryDue(db(), env.DB, shopify.graphql, later.id, NOW);
+    expect(await attemptsOf(subscriber.id)).toHaveLength(2);
+    expect(shopify.charges()).toHaveLength(1);
+    expect(jobs.some((job) => job.type === PAYMENT_ORDER_JOB)).toBe(true);
+    expect((await row(subscriber.id)).releasesRemaining).toBe(1);
+  });
+
+  it("a saved card still goes through an open challenge, and if both then pay, the second isn't credited and is flagged", async () => {
+    const { shop, shopify, subscriber, release } = await failing("ACTION_REQUIRED");
+    shopify.state.decline = null;
+    const [challenged] = await attemptsOf(subscriber.id);
+    await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, false, NOW, true);
+    await deliverWebhooks(shopify);
+    expect(await row(subscriber.id)).toMatchObject({ status: "ACTIVE", releasesRemaining: 1 });
+
+    // The customer now completes the old challenge as well, and the bank takes the money twice.
+    const old = [...shopify.attempts.values()].find((a) => a.key === challenged.idempotencyKey)!;
+    shopify.finish(old);
+    const jobs = await settleAttempt(db(), env.DB, shopify.graphql, old.id, NOW);
+    await settleAttempt(db(), env.DB, shopify.graphql, old.id, NOW);
+    await deliverWebhooks(shopify);
+
+    expect(shopify.charges()).toHaveLength(2);
+    expect((await row(subscriber.id)).releasesRemaining).toBe(1);
+    const rows = await attemptsOf(subscriber.id);
+    expect(rows.map((a) => a.result)).toEqual(["DUPLICATE", "SUCCEEDED"]);
+    expect(rows[0].orderGid).toBe(old.order);
+    // The payment order is marked fulfilled like any other, because it never ships.
+    expect(jobs.some((job) => job.type === PAYMENT_ORDER_JOB)).toBe(true);
+
+    const flags = await db().event.findMany({ where: { subscriptionId: subscriber.id, type: DOUBLE_CHARGE_EVENT } });
+    expect(flags).toHaveLength(1);
+    expect(flags[0].payload).toMatchObject({ orderGid: old.order, chargeFor: release.id });
+    expect(await db().event.count({ where: { subscriptionId: subscriber.id, type: "billing.succeeded" } })).toBe(1);
+    expect((await releasesPageData(db(), env.DB, { id: shop.id, orderTiming: shop.orderTiming })).mixed.map((e) => e.type)).toContain(DOUBLE_CHARGE_EVENT);
+  });
+
+  it("whichever success lands first is the one credited, and a failure landing after it changes nothing", async () => {
+    const { shopify, subscriber } = await failing("ACTION_REQUIRED");
+    shopify.state.decline = null;
+    shopify.state.held = true;
+    await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, false, NOW, true);
+    shopify.state.held = false;
+    const [first, second] = [...shopify.attempts.values()];
+    shopify.finish(first);
+    await settleAttempt(db(), env.DB, shopify.graphql, first.id, NOW);
+    expect((await row(subscriber.id)).releasesRemaining).toBe(1);
+
+    // The new card fails after the old challenge paid: no problem, no retry, no failure email.
+    second.state = {
+      __typename: "SubscriptionBillingAttemptFailedState",
+      error: { __typename: "x", code: "INSUFFICIENT_FUNDS" },
+    };
+    await settleAttempt(db(), env.DB, shopify.graphql, second.id, NOW);
+    expect(await row(subscriber.id)).toMatchObject({ status: "ACTIVE", paymentProblemSince: null, releasesRemaining: 1 });
+    const rows = await attemptsOf(subscriber.id);
+    expect(rows.map((a) => a.nextRetryAt)).toEqual([null, null]);
+    expect(await db().event.count({ where: { subscriptionId: subscriber.id, type: "billing.failed", id: { contains: rows[1].id } } })).toBe(0);
+  });
+
+  it("a second success on a renewal buys no second term, for an imported subscriber as for anyone", async () => {
+    for (const source of ["NEW", "IMPORTED"] as const) {
+      const shop = await newShop();
+      const shopify = fakeShopify();
+      const plan = await newPlan(shop, { renewalRule: "TERM_DATE" });
+      const subscriber = await newSubscriber(shop, shopify, plan, { termEndsAt: days(-1), source });
+      shopify.state.decline = "ACTION_REQUIRED";
+      await renewIfDue(db(), env.DB, shopify.graphql, subscriber.id, NOW);
+      await deliverWebhooks(shopify);
+      shopify.state.decline = null;
+      await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, false, NOW, true);
+      await deliverWebhooks(shopify);
+      const afterFirst = await row(subscriber.id);
+      expect(afterFirst.releasesRemaining).toBe(2);
+
+      const old = [...shopify.attempts.values()][0];
+      shopify.finish(old);
+      await settleAttempt(db(), env.DB, shopify.graphql, old.id, NOW);
+      const afterSecond = await row(subscriber.id);
+      expect(afterSecond.releasesRemaining).toBe(2);
+      expect(afterSecond.termEndsAt).toEqual(afterFirst.termEndsAt);
+      expect((await attemptsOf(subscriber.id)).map((a) => a.result)).toEqual(["DUPLICATE", "SUCCEEDED"]);
+    }
+  });
+
+  it("a charge already paid is never tried again, whatever asks", async () => {
+    const { shopify, subscriber, release } = await failing("INSUFFICIENT_FUNDS");
+    shopify.state.decline = null;
+    const [failed] = await attemptsOf(subscriber.id);
+    await db().billingAttempt.create({
+      data: {
+        subscriptionId: subscriber.id,
+        chargeFor: release.id,
+        idempotencyKey: billingAttemptKey(subscriber.id, release.id, 2),
+        attempt: 2,
+        result: "SUCCEEDED",
+      },
+    });
+    // A retry left over from before the success, however it got here.
+    await db().billingAttempt.update({ where: { id: failed.id }, data: { nextRetryAt: NOW } });
+    await retryDue(db(), env.DB, shopify.graphql, failed.id, NOW);
+    await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, true, NOW);
+    expect(shopify.charges()).toHaveLength(0);
+    expect(shopify.attempts.size).toBe(1);
+  });
+
+  it("a press with no payment problem charges nothing, even with an old failed attempt on file", async () => {
+    const shop = await newShop();
+    const shopify = fakeShopify();
+    const plan = await newPlan(shop, { renewalRule: "TERM_DATE" });
+    const subscriber = await newSubscriber(shop, shopify, plan, { termEndsAt: days(100), releasesRemaining: 1 });
+    await db().billingAttempt.create({
+      data: {
+        subscriptionId: subscriber.id,
+        chargeFor: termChargeFor(days(-300)),
+        idempotencyKey: billingAttemptKey(subscriber.id, termChargeFor(days(-300)), 1),
+        attempt: 1,
+        result: "FAILED",
+        errorCode: "INSUFFICIENT_FUNDS",
+      },
+    });
+    await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, false, NOW);
+    await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, true, NOW);
+    expect(shopify.attempts.size).toBe(0);
   });
 
   it("a customer can't run charge attempts against a failing card more than twice an hour", async () => {
@@ -1176,10 +1357,76 @@ describe("a failed card", () => {
     expect(await attemptsOf(busy.subscriber.id)).toHaveLength(3);
   });
 
+  it("one save that fires two webhooks gets one try, and a save later on gets its own", async () => {
+    const { shop, subscriber } = await failing("INSUFFICIENT_FUNDS");
+    const at = (minutes: number) => new Date(Date.UTC(2027, 5, 1, 12, minutes));
+    const first = await resumeAfterCardUpdate(db(), shop.shopDomain, subscriber.customerGid, at(1));
+    const second = await resumeAfterCardUpdate(db(), shop.shopDomain, subscriber.customerGid, at(2));
+    expect(second.map((job) => job.id)).toEqual(first.map((job) => job.id));
+    const later = await resumeAfterCardUpdate(db(), shop.shopDomain, subscriber.customerGid, at(20));
+    expect(later[0].id).not.toBe(first[0].id);
+    expect(later[0].data).toMatchObject({ byMerchant: false, savedCard: true });
+  });
+
+  describe("the portal's cap of 5 attempts per charge per 30 days", () => {
+    /** Earlier attempts on the failed charge, an hour or more apart so the hourly limit stays out of it. */
+    async function tried(
+      subscriber: { id: string },
+      release: { id: string },
+      ages: number[],
+    ) {
+      for (const [i, age] of ages.entries()) {
+        await db().billingAttempt.create({
+          data: {
+            subscriptionId: subscriber.id,
+            chargeFor: release.id,
+            idempotencyKey: billingAttemptKey(subscriber.id, release.id, i + 2),
+            attempt: i + 2,
+            result: "FAILED",
+            errorCode: "INSUFFICIENT_FUNDS",
+            createdAt: days(age),
+          },
+        });
+      }
+      await db().billingAttempt.updateMany({
+        where: { subscriptionId: subscriber.id, attempt: 1 },
+        data: { createdAt: days(-10) },
+      });
+    }
+
+    it("stops the button at 5, counting scheduled tries as well as its own", async () => {
+      const { shopify, subscriber, release } = await failing("INSUFFICIENT_FUNDS");
+      await tried(subscriber, release, [-9, -8, -7]); // 4 in all
+      await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, false, NOW);
+      expect(await attemptsOf(subscriber.id)).toHaveLength(5);
+      await deliverWebhooks(shopify);
+
+      const later = new Date(NOW.getTime() + 2 * 60 * 60 * 1000);
+      await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, false, later);
+      expect(await attemptsOf(subscriber.id)).toHaveLength(5);
+    });
+
+    it("lets one go again once the oldest are over 30 days old", async () => {
+      const { shopify, subscriber, release } = await failing("INSUFFICIENT_FUNDS");
+      await tried(subscriber, release, [-40, -35, -31, -9]); // 2 within 30 days, counting the first
+      await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, false, NOW);
+      expect(await attemptsOf(subscriber.id)).toHaveLength(6);
+    });
+
+    it("doesn't hold off a merchant's press or a newly saved card", async () => {
+      for (const [byMerchant, savedCard] of [[true, false], [false, true]]) {
+        const { shopify, subscriber, release } = await failing("INSUFFICIENT_FUNDS");
+        await tried(subscriber, release, [-9, -8, -7, -6, -5]); // 6 in all
+        await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, byMerchant, NOW, savedCard);
+        expect(await attemptsOf(subscriber.id)).toHaveLength(7);
+      }
+    });
+  });
+
   it("the same card webhook delivered twice charges once, and a card saved is not the merchant", async () => {
     const { shop, shopify, subscriber } = await failing("INSUFFICIENT_FUNDS");
     shopify.state.decline = null;
-    const jobs = await resumeAfterCardUpdate(db(), shop.shopDomain, subscriber.customerGid, "hook-same");
+    const jobs = await resumeAfterCardUpdate(db(), shop.shopDomain, subscriber.customerGid, NOW);
     expect(jobs).toHaveLength(1);
     expect(jobs[0].data).toMatchObject({ byMerchant: false, savedCard: true });
 
@@ -1189,7 +1436,7 @@ describe("a failed card", () => {
       },
     };
     // The queue can deliver a message twice, and Shopify can send a webhook twice with the same ID.
-    const twice = await resumeAfterCardUpdate(db(), shop.shopDomain, subscriber.customerGid, "hook-same");
+    const twice = await resumeAfterCardUpdate(db(), shop.shopDomain, subscriber.customerGid, NOW);
     expect(twice.map((job) => job.id)).toEqual(jobs.map((job) => job.id));
     const batch = createMessageBatch<unknown>("release-subscriptions-jobs", [jobs[0], twice[0]].map((body, i) => ({
       id: `saved-${++n}-${i}`,
@@ -1209,7 +1456,7 @@ describe("a failed card", () => {
       data: { status: "PAUSED", pausedReason: "CHARGEBACK", paymentProblemSince: NOW },
     });
     shopify.state.decline = null;
-    expect(await resumeAfterCardUpdate(db(), shop.shopDomain, subscriber.customerGid, "hook-cb")).toEqual([]);
+    expect(await resumeAfterCardUpdate(db(), shop.shopDomain, subscriber.customerGid, NOW)).toEqual([]);
     // Even if the job were sent anyway, with the flag set.
     expect(await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, false, NOW, true)).toEqual([]);
     expect(await attemptsOf(subscriber.id)).toHaveLength(1);
@@ -1975,10 +2222,34 @@ describe("shipping on a charge", () => {
   });
 });
 
+/** The notice row the email run writes, by default sent long enough ago. */
+const priceNotice = (
+  shop: TestShop,
+  subscriptionId: string,
+  changeId: string,
+  status: EmailStatus = "SENT",
+  sentAt: Date | null = days(-31),
+) =>
+  db().emailSend.create({
+    data: {
+      id: `priceChange:${subscriptionId}:${changeId}`,
+      shopId: shop.id,
+      subscriptionId,
+      kind: "priceChange",
+      subject: changeId,
+      status,
+      sentAt,
+    },
+  });
+
 describe("the price-change policy", () => {
   async function renewing(
     policy: PriceChangePolicy | null,
-    fields: { effectiveAt?: Date; newPriceCents?: number } = {},
+    fields: {
+      effectiveAt?: Date;
+      newPriceCents?: number;
+      notice?: { status?: EmailStatus; sentAt?: Date | null } | null;
+    } = {},
   ) {
     const shop = await newShop();
     const shopify = fakeShopify();
@@ -1989,7 +2260,7 @@ describe("the price-change policy", () => {
       quantity: 2,
     });
     if (policy) {
-      await db().priceChange.create({
+      const change = await db().priceChange.create({
         data: {
           planId: plan.id,
           newPriceCents: fields.newPriceCents ?? 5000,
@@ -1997,6 +2268,9 @@ describe("the price-change policy", () => {
           effectiveAt: fields.effectiveAt ?? days(-1),
         },
       });
+      if (fields.notice !== null) {
+        await priceNotice(shop, subscriber.id, change.id, fields.notice?.status, fields.notice?.sentAt);
+      }
     }
     return { shop, shopify, plan, subscriber };
   }
@@ -2015,6 +2289,61 @@ describe("the price-change policy", () => {
     expect(shopify.state.drafts).toBe(1);
     expect(shopify.charges()[0].total).toBe(100);
     expect((await row(subscriber.id)).lockedPriceCents).toBe(5000);
+  });
+
+  it("refuses a rise whose notice wasn't really sent: failed, unsure, skipped, still waiting or never written", async () => {
+    const notices = [
+      { status: "FAILED" as const, sentAt: null },
+      { status: "UNSURE" as const, sentAt: null },
+      { status: "SKIPPED" as const, sentAt: null },
+      { status: "PENDING" as const, sentAt: null },
+      null,
+    ];
+    for (const notice of notices) {
+      const { shopify, subscriber } = await renewing("APPLY_AT_RENEWAL", { notice });
+      await renewIfDue(db(), env.DB, shopify.graphql, subscriber.id, NOW);
+      expect(shopify.state.drafts).toBe(0);
+      expect(shopify.charges()[0].total).toBe(80);
+      expect((await row(subscriber.id)).lockedPriceCents).toBe(4000);
+    }
+  });
+
+  it("refuses a rise to someone who signed up in the plan sync's lag at the old price, who got no notice", async () => {
+    const { shop, shopify, plan } = await renewing("APPLY_AT_RENEWAL", { notice: null });
+    await db().priceChange.updateMany({ where: { planId: plan.id }, data: { createdAt: days(-31) } });
+    const lag = await newSubscriber(shop, shopify, plan, {
+      termEndsAt: days(-1),
+      createdAt: days(-31 + 0.001),
+    });
+    await renewIfDue(db(), env.DB, shopify.graphql, lag.id, NOW);
+    expect(shopify.charges()).toHaveLength(1);
+    expect(shopify.state.drafts).toBe(0);
+    expect(shopify.charges()[0].total).toBe(40);
+    expect((await row(lag.id)).lockedPriceCents).toBe(4000);
+  });
+
+  it("refuses a rise whose notice went out too late to give the notice period", async () => {
+    const { shopify, subscriber } = await renewing("APPLY_AT_RENEWAL", {
+      notice: { status: "SENT", sentAt: days(-10) },
+    });
+    await renewIfDue(db(), env.DB, shopify.graphql, subscriber.id, NOW);
+    expect(shopify.state.drafts).toBe(0);
+    expect(shopify.charges()[0].total).toBe(80);
+  });
+
+  it("a notice sent a few hours after the rise was saved still counts", async () => {
+    const { shopify, subscriber } = await renewing("APPLY_AT_RENEWAL", {
+      notice: { status: "SENT", sentAt: new Date(NOW.getTime() - 29.8 * DAY) },
+    });
+    await renewIfDue(db(), env.DB, shopify.graphql, subscriber.id, NOW);
+    expect(shopify.state.drafts).toBe(1);
+  });
+
+  it("a price that comes down needs no notice", async () => {
+    const { shopify, subscriber } = await renewing("APPLY_AT_RENEWAL", { newPriceCents: 3000, notice: null });
+    await renewIfDue(db(), env.DB, shopify.graphql, subscriber.id, NOW);
+    expect(shopify.charges()[0].total).toBe(60);
+    expect((await row(subscriber.id)).lockedPriceCents).toBe(3000);
   });
 
   it("not before its notice is up", async () => {
@@ -2559,7 +2888,7 @@ describe("a gift is never charged", () => {
     it("the buyer saving a new card, and the recipient saving one", async () => {
       const { shop, shopify, gift } = await failing();
       // The webhook finds subscriptions by the saving customer, who here is the gift's own customer.
-      expect(await resumeAfterCardUpdate(db(), shop.shopDomain, gift.customerGid, "w1")).toEqual([]);
+      expect(await resumeAfterCardUpdate(db(), shop.shopDomain, gift.customerGid, NOW)).toEqual([]);
       await retryCharge(db(), env.DB, shopify.graphql, gift.id, false, NOW, true);
       await runResumeJob(
         db(),
@@ -2592,6 +2921,245 @@ describe("a gift is never charged", () => {
       await recoverAttempt(db(), env.DB, shopify.graphql, lost.id, NOW);
       noMoney(shopify);
       expect(await db().billingAttempt.findUnique({ where: { id: lost.id } })).toBeNull();
+    });
+  });
+});
+
+describe("a contract paused in Shopify when a retry comes round", () => {
+  it("stays a payment problem the merchant can see and retry, rather than an unpaid renewal nobody is told about", async () => {
+    const shop = await newShop();
+    const shopify = fakeShopify();
+    const plan = await newPlan(shop, { renewalRule: "TERM_DATE" });
+    const subscriber = await newSubscriber(shop, shopify, plan, { termEndsAt: days(-1) });
+    shopify.state.decline = "INSUFFICIENT_FUNDS";
+    await renewIfDue(db(), env.DB, shopify.graphql, subscriber.id, NOW);
+    await deliverWebhooks(shopify);
+    const [failed] = await attemptsOf(subscriber.id);
+
+    shopify.contracts.get(subscriber.contractGid!).status = "PAUSED";
+    await retryDue(db(), env.DB, shopify.graphql, failed.id, days(3));
+    expect((await row(subscriber.id)).paymentProblemSince).not.toBeNull();
+    expect((await attemptsOf(subscriber.id))[0].nextRetryAt).toBeNull();
+
+    shopify.contracts.get(subscriber.contractGid!).status = "ACTIVE";
+    shopify.state.decline = null;
+    await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, true, days(4));
+    await deliverWebhooks(shopify);
+    expect(shopify.charges()).toHaveLength(1);
+    expect((await row(subscriber.id)).paymentProblemSince).toBeNull();
+  });
+});
+
+describe("Step 9's edges", () => {
+  const perRelease = (shop: TestShop) =>
+    newPlan(shop, { billingMode: "PER_RELEASE", releasesPerTerm: 1, termMonths: null });
+
+  it("a per-release contract with no address isn't charged for an order Shopify would refuse", async () => {
+    const shop = await newShop();
+    const shopify = fakeShopify();
+    const plan = await perRelease(shop);
+    const subscriber = await newSubscriber(shop, shopify, plan);
+    const release = await newRelease(shop, 1);
+    shopify.contracts.get(subscriber.contractGid!).deliveryMethod = {};
+    await drain(shop, shopify, release.id);
+
+    expect(shopify.attempts.size).toBe(0);
+    const delivery = await deliveryOf(subscriber.id, release.id);
+    expect(delivery).toMatchObject({ status: "PENDING", orderGid: null });
+    expect(delivery?.orderError).toContain("no delivery address");
+    expect((await row(subscriber.id)).paymentProblemSince).toBeNull();
+
+    // Once it has one, choosing the product again is the retry, as for any refused order.
+    shopify.contracts.get(subscriber.contractGid!).deliveryMethod = { address: { address1: "1 Test St" } };
+    await db().delivery.updateMany({ where: { releaseId: release.id }, data: { orderError: null } });
+    await drain(shop, shopify, release.id);
+    expect(shopify.attempts.size).toBe(1);
+  });
+
+  it("a bundle's renewal doesn't need an address, because it buys no one order", async () => {
+    const shop = await newShop();
+    const shopify = fakeShopify();
+    const plan = await newPlan(shop, { renewalRule: "TERM_DATE" });
+    const subscriber = await newSubscriber(shop, shopify, plan, { termEndsAt: days(-1) });
+    shopify.contracts.get(subscriber.contractGid!).deliveryMethod = {};
+    await renewIfDue(db(), env.DB, shopify.graphql, subscriber.id, NOW);
+    expect(shopify.charges()).toHaveLength(1);
+  });
+
+  const heldEnv = { DB: env.DB, JOBS: { sendBatch: async () => {} } } as any;
+
+  async function pausedOnPreorder() {
+    const shop = await newShop("PREORDER_OPENS");
+    const shopify = fakeShopify();
+    const plan = await perRelease(shop);
+    const subscriber = await newSubscriber(shop, shopify, plan);
+    const release = await newRelease(shop, 5, "PREORDER");
+    await newRelease(shop, 4, "SHIPPED");
+    shopify.state.decline = "EXPIRED_CARD";
+    await slice(shop, shopify, release.id);
+    await db().release.update({ where: { id: release.id }, data: { runLeaseUntil: null } });
+    await deliverWebhooks(shopify);
+    expect(await row(subscriber.id)).toMatchObject({ status: "PAUSED", pausedReason: "FAILED_PAYMENT" });
+    expect((await deliveryOf(subscriber.id, release.id))?.status).toBe("HELD");
+    return { shop, shopify, plan, subscriber, release };
+  }
+
+  it("cancelling the release a paused subscriber's charge was for ends the problem, with nothing to press", async () => {
+    const { shop, subscriber, release } = await pausedOnPreorder();
+    expect((await moveRelease(db(), heldEnv, { ...shop, shopDomain: shop.shopDomain }, release.id, "cancel", NOW)).ok).toBe(true);
+    expect(await row(subscriber.id)).toMatchObject({
+      status: "ACTIVE",
+      pausedReason: null,
+      paymentProblemSince: null,
+      releasesRemaining: 0,
+    });
+    expect((await deliveryOf(subscriber.id, release.id))?.status).toBe("CANCELLED");
+    expect((await listPaymentProblems(db(), shop.id)).rows).toHaveLength(0);
+  });
+
+  it("but leaves a chargeback, another held release and a bundle's unpaid renewal as they are", async () => {
+    const hold = await pausedOnPreorder();
+    await db().subscription.update({ where: { id: hold.subscriber.id }, data: { pausedReason: "CHARGEBACK" } });
+    await moveRelease(db(), heldEnv, { ...hold.shop, shopDomain: hold.shop.shopDomain }, hold.release.id, "cancel", NOW);
+    expect(await row(hold.subscriber.id)).toMatchObject({ status: "PAUSED", pausedReason: "CHARGEBACK" });
+
+    const two = await pausedOnPreorder();
+    const other = await newRelease(two.shop, 6, "PREORDER");
+    await db().delivery.create({ data: { subscriptionId: two.subscriber.id, releaseId: other.id, status: "HELD" } });
+    await moveRelease(db(), heldEnv, { ...two.shop, shopDomain: two.shop.shopDomain }, two.release.id, "cancel", NOW);
+    expect(await row(two.subscriber.id)).toMatchObject({ status: "PAUSED", pausedReason: "FAILED_PAYMENT" });
+
+    const shop = await newShop("PREORDER_OPENS");
+    const shopify = fakeShopify();
+    const bundle = await newPlan(shop);
+    const subscriber = await newSubscriber(shop, shopify, bundle, { status: "PAUSED" });
+    await db().subscription.update({
+      where: { id: subscriber.id },
+      data: { pausedReason: "FAILED_PAYMENT", paymentProblemSince: NOW },
+    });
+    const release = await newRelease(shop, 1, "PREORDER");
+    await db().delivery.create({ data: { subscriptionId: subscriber.id, releaseId: release.id, status: "HELD" } });
+    await moveRelease(db(), heldEnv, { ...shop, shopDomain: shop.shopDomain }, release.id, "cancel", NOW);
+    expect(await row(subscriber.id)).toMatchObject({ status: "PAUSED", pausedReason: "FAILED_PAYMENT" });
+  });
+
+  describe("a contract reactivated in Shopify", () => {
+    const reactivated = (shopify: Shopify, subscriber: { contractGid: string | null }, sellingPlanGid: string | null) => {
+      const graphql: Graphql = async (query, variables) =>
+        query.includes("ContractForSync")
+          ? {
+              subscriptionContract: {
+                id: subscriber.contractGid,
+                status: "ACTIVE",
+                createdAt: days(-100).toISOString(),
+                customer: { id: "gid://shopify/Customer/1" },
+                originOrder: null,
+                customAttributes: [],
+                lines: { nodes: [{ quantity: 1, sellingPlanId: sellingPlanGid, currentPrice: { amount: "40.0" } }] },
+              },
+            }
+          : shopify.graphql(query, variables);
+      return graphql;
+    };
+
+    it("isn't charged for a release already open, and joins the next one", async () => {
+      const shop = await newShop();
+      const shopify = fakeShopify();
+      const plan = await perRelease(shop);
+      const subscriber = await newSubscriber(shop, shopify, plan, { status: "CANCELLED" });
+      const open = await newRelease(shop, 2);
+      await syncContract(db(), env.DB, reactivated(shopify, subscriber, plan.sellingPlanGid), shop, subscriber.contractGid!, NOW);
+      expect(await row(subscriber.id)).toMatchObject({ status: "ACTIVE", firstReleaseNumber: 3 });
+      await drain(shop, shopify, open.id);
+      expect(shopify.attempts.size).toBe(0);
+      expect(await deliveryOf(subscriber.id, open.id)).toBeNull();
+
+      const next = await newRelease(shop, 3);
+      await drain(shop, shopify, next.id);
+      expect(shopify.attempts.size).toBe(1);
+    });
+
+    it("keeps its place if it still has paid releases, which are still owed", async () => {
+      const shop = await newShop();
+      const shopify = fakeShopify();
+      const plan = await newPlan(shop);
+      const subscriber = await newSubscriber(shop, shopify, plan, { status: "CANCELLED", releasesRemaining: 1 });
+      await newRelease(shop, 2);
+      await syncContract(db(), env.DB, reactivated(shopify, subscriber, plan.sellingPlanGid), shop, subscriber.contractGid!, NOW);
+      expect(await row(subscriber.id)).toMatchObject({ status: "ACTIVE", firstReleaseNumber: 1 });
+    });
+
+    describe("with its renewal already failed on this term", () => {
+      async function failedRenewal() {
+        const shop = await newShop();
+        const shopify = fakeShopify();
+        const plan = await newPlan(shop, { renewalRule: "TERM_DATE_HOLD_IF_LATE" });
+        const subscriber = await newSubscriber(shop, shopify, plan, { termEndsAt: days(-30) });
+        shopify.state.decline = "INSUFFICIENT_FUNDS";
+        await renewIfDue(db(), env.DB, shopify.graphql, subscriber.id, days(-29));
+        await deliverWebhooks(shopify, days(-29));
+        await markCancelled(env.DB, subscriber.id, days(-20));
+        shopify.state.decline = null;
+        const before = shopify.attempts.size;
+        await syncContract(db(), env.DB, reactivated(shopify, subscriber, plan.sellingPlanGid), shop, subscriber.contractGid!, NOW);
+        return { shop, shopify, subscriber, before };
+      }
+
+      it("is flagged as a payment problem and charges nothing by itself, because that would give no notice", async () => {
+        const { shop, shopify, subscriber, before } = await failedRenewal();
+        expect(await row(subscriber.id)).toMatchObject({
+          status: "PAUSED",
+          pausedReason: "FAILED_PAYMENT",
+          paymentProblemSince: NOW,
+        });
+        expect((await listPaymentProblems(db(), shop.id)).rows.map((r) => r.id)).toContain(subscriber.id);
+
+        await install(shop);
+        expect((await findRenewals({ env, db: db(), now: NOW })).filter((j) => j.data?.subscriptionId === subscriber.id)).toEqual([]);
+        expect((await findRetries({ env, db: db(), now: NOW })).filter((j) => j.shop === shop.shopDomain)).toEqual([]);
+        await renewIfDue(db(), env.DB, shopify.graphql, subscriber.id, NOW);
+        expect(shopify.attempts.size).toBe(before);
+        expect(shopify.charges()).toHaveLength(0);
+      });
+
+      it("a merchant's Retry charge is what renews it, once", async () => {
+        const { shopify, subscriber } = await failedRenewal();
+        await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, true, NOW);
+        await deliverWebhooks(shopify);
+        expect(shopify.charges()).toHaveLength(1);
+        expect(await row(subscriber.id)).toMatchObject({ status: "ACTIVE", paymentProblemSince: null, releasesRemaining: 2 });
+      });
+
+      it("isn't flagged with no failed attempt on this term, or an old one on a term since paid", async () => {
+        const shop = await newShop();
+        const shopify = fakeShopify();
+        const plan = await newPlan(shop);
+        const fresh = await newSubscriber(shop, shopify, plan, { status: "CANCELLED", termEndsAt: days(-5) });
+        await db().billingAttempt.create({
+          data: {
+            subscriptionId: fresh.id,
+            chargeFor: termChargeFor(days(-400)),
+            idempotencyKey: billingAttemptKey(fresh.id, termChargeFor(days(-400)), 1),
+            attempt: 1,
+            result: "FAILED",
+          },
+        });
+        await syncContract(db(), env.DB, reactivated(shopify, fresh, plan.sellingPlanGid), shop, fresh.contractGid!, NOW);
+        expect(await row(fresh.id)).toMatchObject({ status: "ACTIVE", paymentProblemSince: null, pausedReason: null });
+      });
+    });
+
+    it("stays held if a chargeback outlasted the cancellation", async () => {
+      const shop = await newShop();
+      const shopify = fakeShopify();
+      const plan = await perRelease(shop);
+      const subscriber = await newSubscriber(shop, shopify, plan, { status: "CANCELLED" });
+      await db().subscription.update({
+        where: { id: subscriber.id },
+        data: { pausedReason: "CHARGEBACK", paymentProblemSince: NOW },
+      });
+      await syncContract(db(), env.DB, reactivated(shopify, subscriber, plan.sellingPlanGid), shop, subscriber.contractGid!, NOW);
+      expect(await row(subscriber.id)).toMatchObject({ status: "PAUSED", pausedReason: "CHARGEBACK" });
     });
   });
 });

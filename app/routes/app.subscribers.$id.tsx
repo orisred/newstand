@@ -122,7 +122,7 @@ export default function Subscriber() {
         <s-banner tone="critical" heading="No card on this contract">
           <s-paragraph>
             Imported with no saved card, so the next charge will fail, retry and then pause. A card
-            the customer saves is picked up just before the charge.
+            the customer saves goes on the contract when they save it, and this goes away.
           </s-paragraph>
         </s-banner>
       )}
@@ -256,7 +256,9 @@ export default function Subscriber() {
                   <s-table-cell>
                     {a.result === "FAILED"
                       ? `Failed (try ${a.attempt}${a.errorCode ? `, ${a.errorCode.replaceAll("_", " ").toLowerCase()}` : ""})`
-                      : capitalize(a.result.toLowerCase())}
+                      : a.result === "DUPLICATE"
+                        ? "Charged twice: refund this one"
+                        : capitalize(a.result.toLowerCase())}
                   </s-table-cell>
                   <s-table-cell>{a.amount ?? ""}</s-table-cell>
                 </s-table-row>

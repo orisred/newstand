@@ -4,6 +4,8 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { createDb } from "../app/db.server";
 import {
   DATA_REQUEST_EVENT,
+  dataRequestFile,
+  dataRequestHandedOver,
   recordDataRequest,
   redactCustomer,
   redactShop,
@@ -61,6 +63,48 @@ async function setup() {
   });
   return { domain, shop, plan, release, subscription, other };
 }
+
+describe("redactCustomer and the job log", () => {
+  it("removes the card webhook's job row, whose key holds the customer's ID, and no one else's", async () => {
+    const { domain } = await setup();
+    const mine = `billing.card_updated:${CUSTOMER}:hook-1`;
+    const theirs = `billing.card_updated:gid://shopify/Customer/778:hook-2`;
+    for (const key of [mine, theirs]) {
+      await env.DB.prepare(`INSERT INTO "JobRun" ("key", "type", "status", "updatedAt") VALUES (?1, 'billing.card_updated', 'DONE', ?2)`)
+        .bind(key, new Date().toISOString())
+        .run();
+    }
+    await redactCustomer(db(), env.DB, domain, CUSTOMER);
+    expect(await db().jobRun.count({ where: { key: mine } })).toBe(0);
+    expect(await db().jobRun.count({ where: { key: theirs } })).toBe(1);
+  });
+});
+
+describe("handing over a data request", () => {
+  it("gives the merchant its own shop's file, says what else is held, and forgets it once handed over", async () => {
+    const { domain, shop, subscription } = await setup();
+    await db().event.create({
+      data: { id: `portal.cancelled:${++n}`, shopId: shop.id, subscriptionId: subscription.id, type: "portal.cancelled", payload: {} },
+    });
+    await db().memberTag.create({
+      data: { id: `${shop.id}:${CUSTOMER}`, shopId: shop.id, customerGid: CUSTOMER, tag: "active-subscriber" },
+    });
+    await recordDataRequest(db(), env.DB, domain, CUSTOMER, "req-file");
+    const [request] = await db().event.findMany({ where: { shopId: shop.id, type: DATA_REQUEST_EVENT } });
+
+    const file = await dataRequestFile(db(), shop.id, request.id);
+    expect(JSON.parse(file!)).toMatchObject({
+      customerGid: CUSTOMER,
+      memberTag: "active-subscriber",
+      subscriptions: [{ id: subscription.id, events: expect.arrayContaining([expect.objectContaining({ type: "portal.cancelled" })]) }],
+    });
+    expect(await dataRequestFile(db(), "another-shop", request.id)).toBeNull();
+
+    expect(await dataRequestHandedOver(db(), "another-shop", request.id)).toBe(false);
+    expect(await dataRequestHandedOver(db(), shop.id, request.id)).toBe(true);
+    expect(await db().event.count({ where: { id: request.id } })).toBe(0);
+  });
+});
 
 describe("recordDataRequest", () => {
   it("keeps what the app holds for the merchant, once, and nothing about others", async () => {

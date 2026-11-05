@@ -10,6 +10,7 @@ import {
   type GiftDetails,
   GIFT_INVALID_EVENT,
   isGiftPlan,
+  type ParsedGift,
   parseGiftLines,
 } from "./gifts.server";
 import { logEvent } from "./logger.server";
@@ -38,6 +39,16 @@ export const RELEASE_FIRE_JOB = "release.fire";
 export const IMPORT_MARKER = "_release_subscriptions_import";
 /** `pausedReason` of an imported subscriber waiting for a merchant: paid releases ship, nothing is charged. */
 export const IMPORT_HOLD = "IMPORT_HOLD";
+
+/** The middle of a bundle renewal's key. It has no release, and a term renews once. */
+export const termChargeFor = (termEndsAt: Date) => `term-${termEndsAt.getTime()}`;
+
+/** A subscription's first release, moved past every release that has reached its order step. */
+export const PAST_REACHED = `MAX("firstReleaseNumber", 1 + COALESCE((
+  SELECT MAX(r."number") FROM "Release" r JOIN "Shop" sh ON sh."id" = r."shopId"
+  WHERE r."shopId" = "Subscription"."shopId"
+    AND (r."status" IN ('READY', 'SHIPPED')
+      OR (r."status" = 'PREORDER' AND sh."orderTiming" = 'PREORDER_OPENS'))), 0))`;
 
 /**
  * A closed contract. Paid releases still ship, and a chargeback stays flagged, but nothing is
@@ -87,6 +98,8 @@ export async function markCancelled(
 /** Flags a paid contract holding several plans. Becomes `MIXED_HANDLED` when the merchant has dealt with it. */
 export const MIXED_PLANS_EVENT = "contract.mixed_plans";
 export const MIXED_HANDLED_EVENT = "contract.mixed_plans.handled";
+/** A paid sign-up whose contract job used up its retries: a customer who paid and has nothing yet. */
+export const SIGNUP_DEAD_EVENT = "contract.sync_dead";
 
 type ReleaseStep = {
   id: string;
@@ -342,7 +355,7 @@ export async function syncContract(
 
   let subscription = await db.subscription.findUnique({
     where: { contractGid },
-    select: { id: true, status: true, source: true },
+    select: { id: true, status: true, source: true, termEndsAt: true },
   });
 
   if (!subscription) {
@@ -359,9 +372,13 @@ export async function syncContract(
     // A gift belongs to its recipient, not to the contract's customer, who is the buyer.
     let customerGid: string = contract.customer.id;
     let gift: GiftDetails | null = null;
-    const parsed = isGiftPlan(plan)
-      ? parseGiftLines(planLines)
-      : ({ kind: "none" } as const);
+    const lineGift = parseGiftLines(planLines);
+    // Gift details on a plan that can't be a gift: gifts switched off during checkout, or a crafted cart. The
+    // buyer meant a gift and paid, so making it their own, with nothing shown, is what must not happen.
+    const parsed: ParsedGift =
+      lineGift.kind === "none" || isGiftPlan(plan)
+        ? lineGift
+        : { kind: "invalid", reason: "plan_not_giftable" };
     if (parsed.kind === "gift") {
       gift = parsed.gift;
       const recipient = await findOrCreateRecipient(graphql, gift);
@@ -448,6 +465,14 @@ export async function syncContract(
            ON CONFLICT DO NOTHING`,
         )
         .bind(`${STARTED_EVENT}:${contractGid}`, STARTED_EVENT, contractGid),
+      // It has its subscription now, whichever way it got here, so what flagged it is over.
+      rawDb
+        .prepare(`UPDATE "Event" SET "type" = ?1 WHERE "id" IN (?2, ?3)`)
+        .bind(
+          MIXED_HANDLED_EVENT,
+          `${GIFT_INVALID_EVENT}:${contractGid}`,
+          `${SIGNUP_DEAD_EVENT}:${contractGid}`,
+        ),
       // Only if the insert above won, so a lost race can't add a second first release.
       ...(release
         ? [
@@ -463,17 +488,36 @@ export async function syncContract(
     ]);
     subscription = await db.subscription.findUniqueOrThrow({
       where: { contractGid },
-      select: { id: true, status: true, source: true },
+      select: { id: true, status: true, source: true, termEndsAt: true },
     });
   } else {
     const status = statusFor(contract.status, subscription.status);
     if (status === "CANCELLED") {
       await markCancelled(rawDb, subscription.id, now);
     } else if (status) {
-      await db.subscription.updateMany({
-        where: { id: subscription.id, status: subscription.status },
-        data: { status },
-      });
+      // Reactivated in Shopify. What came out meanwhile isn't theirs unless already paid for, so a release
+      // open right now can't charge them with no notice. A chargeback that outlasted the cancellation still holds.
+      // A renewal that had already failed on this term can never run by itself, because attempt 1 is spent and
+      // nothing would show it. So it's a payment problem again, paused and with no retry: a charge now would
+      // give no notice, so it takes someone pressing a button (N, 2026-11-05).
+      const unpaid = `EXISTS (SELECT 1 FROM "BillingAttempt" b WHERE b."subscriptionId" = ?1 AND b."chargeFor" = ?3 AND b."result" = 'FAILED')
+        AND NOT EXISTS (SELECT 1 FROM "BillingAttempt" b WHERE b."subscriptionId" = ?1 AND b."chargeFor" = ?3 AND b."result" = 'SUCCEEDED')
+        AND COALESCE("pausedReason", '') <> 'CHARGEBACK'`;
+      await rawDb
+        .prepare(
+          `UPDATE "Subscription" SET "updatedAt" = ?2,
+             "status" = CASE WHEN "pausedReason" = 'CHARGEBACK' OR (${unpaid}) THEN 'PAUSED' ELSE 'ACTIVE' END,
+             "pausedReason" = CASE WHEN ${unpaid} THEN 'FAILED_PAYMENT' ELSE "pausedReason" END,
+             "paymentProblemSince" = CASE WHEN ${unpaid} THEN ?2 ELSE "paymentProblemSince" END,
+             "firstReleaseNumber" = CASE WHEN "releasesRemaining" <= 0 THEN ${PAST_REACHED} ELSE "firstReleaseNumber" END
+           WHERE "id" = ?1 AND "status" = 'CANCELLED'`,
+        )
+        .bind(
+          subscription.id,
+          now.toISOString(),
+          subscription.termEndsAt ? termChargeFor(subscription.termEndsAt) : "",
+        )
+        .run();
     }
   }
 
@@ -499,6 +543,47 @@ export async function syncContract(
       )
       .map(({ id }) => deliveryOrderJob(shop.shopDomain, id, "first")),
   ];
+}
+
+/**
+ * Called when a job reaches the dead-letter queue. A contract job that dies on a sign-up leaves a customer
+ * who paid with nothing, and the hourly check won't run it again under the same ID, so the merchant has to see it.
+ */
+export async function flagDeadSignup(rawDb: D1Database, job: Partial<Job> | null) {
+  const contractGid = job?.data?.contractGid;
+  if (job?.type !== CONTRACT_JOB || !job.shop || typeof contractGid !== "string") return;
+  await rawDb
+    .prepare(
+      `INSERT INTO "Event" ("id", "shopId", "type", "payload")
+       SELECT ?1, "id", ?2, ?3 FROM "Shop" WHERE "shopDomain" = ?4
+         AND NOT EXISTS (SELECT 1 FROM "Subscription" WHERE "contractGid" = ?5)
+       ON CONFLICT ("id") DO UPDATE SET "type" = excluded."type"`,
+    )
+    .bind(
+      `${SIGNUP_DEAD_EVENT}:${contractGid}`,
+      SIGNUP_DEAD_EVENT,
+      JSON.stringify({ contractGid }),
+      job.shop,
+      contractGid,
+    )
+    .run();
+}
+
+/**
+ * The merchant's Try again on a flagged sign-up: the contract's job again, under a new ID, reading the
+ * contract fresh. The flag stays until a subscription exists, because the job may find it's still wrong.
+ */
+export async function signupRetryJob(
+  db: Db,
+  shop: { id: string; shopDomain: string },
+  eventId: string,
+) {
+  const flag = await db.event.findFirst({
+    where: { id: eventId, shopId: shop.id, type: { in: [GIFT_INVALID_EVENT, SIGNUP_DEAD_EVENT] } },
+    select: { payload: true },
+  });
+  const contractGid = (flag?.payload as { contractGid?: string } | undefined)?.contractGid;
+  return contractGid ? contractJob(shop.shopDomain, contractGid, crypto.randomUUID()) : null;
 }
 
 const MAX_RECONCILE_PAGES = 20;

@@ -16,7 +16,7 @@ import type { Job } from "./jobs/runner.server";
 import { describeError, logEvent } from "./logger.server";
 import type { Graphql } from "./plan-sync.server";
 import { CHARGE_DUE, CHARGEBACK_HOLD, DUE_SUBSCRIPTION } from "./release-runs.server";
-import { emailRunJob } from "./notification-jobs";
+import { emailRunJob, noticeGiven } from "./notification-jobs";
 import { type EmailKey, isEmailEnabled } from "./shop.server";
 import { IMPORT_HOLD } from "./subscriptions.server";
 
@@ -85,7 +85,6 @@ const PREORDER = `FROM "Release" r
   JOIN "Subscription" s ON s."shopId" = r."shopId"
   JOIN "Plan" p ON p."id" = s."planId"`;
 const PREORDER_OPEN = `r."shopId" = ?1 AND r."status" = 'PREORDER'
-  AND ${within(`r."preorderOpensAt"`, PREORDER_WITHIN_DAYS)}
   AND julianday(s."createdAt") < julianday(r."preorderOpensAt")`;
 
 // Nothing will charge this subscriber after the release that just shipped.
@@ -128,7 +127,8 @@ const QUEUES: string[] = [
     "preorderAnnounced",
     `r."id"`,
     `${PREORDER}
-     WHERE ${PREORDER_OPEN} AND ${BASE} AND s."status" <> 'ENDED' AND NOT ${CHARGEBACK_HOLD}
+     WHERE ${PREORDER_OPEN} AND ${within(`r."preorderOpensAt"`, PREORDER_WITHIN_DAYS)}
+       AND ${BASE} AND s."status" <> 'ENDED' AND NOT ${CHARGEBACK_HOLD}
        AND (EXISTS (SELECT 1 FROM "Delivery" d WHERE d."subscriptionId" = s."id"
               AND d."releaseId" = r."id" AND d."status" <> 'CANCELLED')
          OR (${DUE_SUBSCRIPTION}))`,
@@ -152,7 +152,8 @@ const QUEUES: string[] = [
   ),
   // Undated: a charge that happens when a release starts shipping, which can have no date, so the
   // only warning there is comes with its pre-order. Not under PREORDER_OPENS: the charge is then
-  // made the moment the pre-order opens, and Shopify's receipt is the notice.
+  // made the moment the pre-order opens, and Shopify's receipt is the notice. No recency limit: someone
+  // paused when it opened, who recovers weeks later, is still charged when it ships, and needs telling.
   insertEmails(
     "upcomingCharge",
     `'release:' || r."id"`,
@@ -227,7 +228,8 @@ export async function queueEmails(rawDb: D1Database, shopId: string, now: Date) 
 /**
  * The price change's notice is sent once every row for it has settled. A change nobody needs
  * telling about is marked at once. A change whose date has passed is left alone. `now` is the
- * moment the rows were queued: a change saved after it hasn't had its rows written yet.
+ * moment the rows were queued: a change saved after it hasn't had its rows written yet. Nothing that
+ * charges reads this: `applyPriceChange` checks each subscriber's own row, because a settled row may have failed.
  */
 async function markPriceNotices(rawDb: D1Database, shopId: string, now: Date) {
   await rawDb
@@ -284,7 +286,7 @@ type Shop = {
 };
 
 type Release = { id: string; title: string; status: string };
-type PriceChange = { id: string; planId: string; newPriceCents: number; effectiveAt: Date };
+type PriceChange = { id: string; planId: string; newPriceCents: number; effectiveAt: Date; policy?: string };
 
 const ENDED_OR_REDACTED = (row: Row) =>
   row.status === "ENDED" || row.customerGid === "redacted";
@@ -361,14 +363,19 @@ export function staleReason(
 const money = (row: Row, cents: number, shippingCents: number) =>
   formatMoney(cents * row.quantity + shippingCents, row.currency);
 
-/** What the subscriber will be charged: the contract's price, or the new one once a rise has taken effect. */
-function chargeCents(row: Row, change: PriceChange | undefined, on: Date) {
-  const rises =
-    change &&
+/**
+ * What the subscriber will be charged: the contract's price, or the new one once a change has taken effect,
+ * as `applyPriceChange` will decide it. A rise takes the subscriber's own notice, sent in time.
+ */
+function chargeCents(row: Row, change: PriceChange | undefined, on: Date, ctx: SendContext) {
+  const applies =
+    change?.policy === "APPLY_AT_RENEWAL" &&
     change.effectiveAt <= on &&
     new Date(row.createdAt) < change.effectiveAt &&
-    row.lockedPriceCents !== change.newPriceCents;
-  return rises ? change.newPriceCents : (row.lockedPriceCents ?? row.priceCents);
+    row.lockedPriceCents !== change.newPriceCents &&
+    ((row.lockedPriceCents !== null && change.newPriceCents < row.lockedPriceCents) ||
+      noticeGiven(ctx.notices.get(`priceChange:${row.subscriptionId}:${change.id}`), on));
+  return applies ? change.newPriceCents : (row.lockedPriceCents ?? row.priceCents);
 }
 
 const statesAmount = (row: Row) => row.kind === "upcomingCharge" || row.kind === "priceChange";
@@ -378,6 +385,8 @@ type SendContext = {
   releases: Map<string, Release>;
   latest: Map<string, PriceChange>;
   changes: Map<string, PriceChange>;
+  /** When each price notice was sent, by its row's ID. */
+  notices: Map<string, Date | null>;
   events: Map<string, { nextRetryAt: string | null }>;
   deliveries: Map<string, string>;
   /** The contracts' delivery prices, in cents, by contract ID. */
@@ -424,7 +433,7 @@ async function dataFor(row: Row, ctx: SendContext): Promise<EmailData> {
         return {
           kind: "upcomingCharge",
           plan: row.displayName,
-          amount: money(row, chargeCents(row, change, now), shipping),
+          amount: money(row, chargeCents(row, change, now, ctx), shipping),
           portalUrl: ctx.portalUrl,
           when: { release: release(value) },
         };
@@ -433,7 +442,7 @@ async function dataFor(row: Row, ctx: SendContext): Promise<EmailData> {
       return {
         kind: "upcomingCharge",
         plan: row.displayName,
-        amount: money(row, chargeCents(row, change, termEnd), shipping),
+        amount: money(row, chargeCents(row, change, termEnd, ctx), shipping),
         portalUrl: ctx.portalUrl,
         when: type === "late" ? { held: termEnd } : { on: termEnd, releases: row.releasesPerTerm },
       };
@@ -652,12 +661,23 @@ export async function runEmailSlice(
     });
     if (change) latest.set(planId, change);
   }
+  const noticeIds = rows.flatMap((row) => {
+    const change = row.kind === "upcomingCharge" ? latest.get(row.planId) : undefined;
+    return change ? [`priceChange:${row.subscriptionId}:${change.id}`] : [];
+  });
+  const notices = noticeIds.length
+    ? await db.emailSend.findMany({
+        where: { id: { in: noticeIds }, status: "SENT" },
+        select: { id: true, sentAt: true },
+      })
+    : [];
 
   const ctx = {
     env,
     releases: new Map<string, Release>(releases.map((release) => [release.id, release])),
     latest,
     changes,
+    notices: new Map(notices.map((notice) => [notice.id, notice.sentAt])),
     events: new Map(
       events.map((event) => [
         event.id,
@@ -783,7 +803,9 @@ export async function runEmailSlice(
     }
   }
 
-  await markPriceNotices(rawDb, shop.id, started);
+  // Only a slice that queued: `started` must be the moment the rows were written, or a rise saved since the
+  // chain began looks as if all its rows have settled, and its notices are never queued.
+  if (job.data?.queued !== true) await markPriceNotices(rawDb, shop.id, started);
   logEvent("info", "email.slice", { shopId: shop.id, sent, skipped, failed, waitSeconds: wait ?? 0 });
   if (wait !== null) return next(wait);
   return rows.length === EMAILS_PER_SLICE ? next(0) : null;

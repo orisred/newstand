@@ -627,17 +627,20 @@ export async function refreshDashboard(db: Db, rawDb: D1Database, graphql: Graph
   if (!shop) return;
   let priced = 0;
 
+  // Pages move on by ID, so what Shopify doesn't return stays unread without holding up what comes after it.
+  let after = "";
   for (let page = 0; page < PAGES; page++) {
     const { results: attempts } = await rawDb
       .prepare(
         `SELECT b."id", b."orderGid" FROM "BillingAttempt" b JOIN "Subscription" s ON s."id" = b."subscriptionId"
          WHERE s."shopId" = ?1 AND b."result" = 'SUCCEEDED' AND b."orderGid" IS NOT NULL
-           AND b."orderGid" <> '' AND b."amountCents" IS NULL
-         ORDER BY b."createdAt" DESC LIMIT ?2`,
+           AND b."orderGid" <> '' AND b."amountCents" IS NULL AND b."id" > ?3
+         ORDER BY b."id" LIMIT ?2`,
       )
-      .bind(shop.id, PER_PAGE)
+      .bind(shop.id, PER_PAGE, after)
       .all<{ id: string; orderGid: string }>();
     if (attempts.length === 0) break;
+    after = attempts[attempts.length - 1].id;
     const { nodes } = await graphql(ORDER_AMOUNTS, { ids: attempts.map((a) => a.orderGid) });
     const byOrder = new Map<string, number>();
     for (const node of nodes as ({ id: string; currentSubtotalPriceSet: never } | null)[]) {
@@ -655,20 +658,21 @@ export async function refreshDashboard(db: Db, rawDb: D1Database, graphql: Graph
     );
     if (updates.length) await rawDb.batch(updates);
     priced += updates.length;
-    // Orders Shopify didn't return stay unread and come up again, so stop rather than loop on them.
-    if (updates.length < attempts.length) break;
   }
 
+  after = "";
   for (let page = 0; page < PAGES; page++) {
     const { results: signups } = await rawDb
       .prepare(
         `SELECT "id", "contractGid" FROM "Subscription"
          WHERE "shopId" = ?1 AND "signupCents" IS NULL AND "contractGid" IS NOT NULL AND "source" <> 'IMPORTED'
-         ORDER BY "createdAt" DESC LIMIT ?2`,
+           AND "id" > ?3
+         ORDER BY "id" LIMIT ?2`,
       )
-      .bind(shop.id, PER_PAGE)
+      .bind(shop.id, PER_PAGE, after)
       .all<{ id: string; contractGid: string }>();
     if (signups.length === 0) break;
+    after = signups[signups.length - 1].id;
     const { nodes } = await graphql(CONTRACT_AMOUNTS, { ids: signups.map((s) => s.contractGid) });
     const byContract = new Map<string, number>();
     for (const node of nodes as (({ id: string } & ContractNode) | null)[]) {
@@ -686,7 +690,6 @@ export async function refreshDashboard(db: Db, rawDb: D1Database, graphql: Graph
     );
     if (updates.length) await rawDb.batch(updates);
     priced += updates.length;
-    if (updates.length < signups.length) break;
   }
 
   const plans = await db.plan.findMany({

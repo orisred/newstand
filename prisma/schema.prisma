@@ -221,6 +221,7 @@ enum BillingResult {
   PENDING
   SUCCEEDED
   FAILED
+  DUPLICATE // a second success on a charge already paid: not credited, flagged for a refund
 }
 
 model BillingAttempt {
@@ -404,6 +405,17 @@ model JobRun {
   body           String?      // the message, kept when it goes DEAD so it can be sent again
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
+
+  @@index([status, updatedAt])
+}
+
+// A limiter's count in its current window. `key` is a hash, so no customer ID or IP is kept. See app/rate-limit.server.ts.
+model RateLimit {
+  key          String   @id
+  count        Int      @default(1)
+  windowEndsAt DateTime
+
+  @@index([windowEndsAt])
 }
 
 // Shopify offline tokens. Read and written only by app/session-storage.server.ts. See DECISIONS.md.

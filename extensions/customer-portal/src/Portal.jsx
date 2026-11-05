@@ -141,7 +141,7 @@ function Subscription({data, subscription, reload}) {
           ))
         )}
 
-        {!cancelled && subscription.address && (
+        {(!cancelled || subscription.paidLeft > 0) && subscription.address && (
           <>
             <s-heading>Delivery address</s-heading>
             <s-text>

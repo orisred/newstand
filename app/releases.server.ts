@@ -10,9 +10,17 @@ import {
 } from "./release-actions";
 import { emailRunJob } from "./notification-jobs";
 import { listStockWarnings, listUnsureEmails } from "./dashboard.server";
+import { DOUBLE_CHARGE_EVENT } from "./billing.server";
 import { GIFT_INVALID_EVENT } from "./gifts.server";
 import { createDueDeliveries } from "./release-runs.server";
-import { MIXED_PLANS_EVENT, orderStepReached, releaseRunJob } from "./subscriptions.server";
+import { DATA_REQUEST_EVENT } from "./gdpr.server";
+import {
+  MIXED_PLANS_EVENT,
+  orderStepReached,
+  PAST_REACHED,
+  releaseRunJob,
+  SIGNUP_DEAD_EVENT,
+} from "./subscriptions.server";
 
 type Db = ReturnType<typeof createDb>;
 
@@ -21,6 +29,15 @@ export const PAGE_SIZE = 25;
 export const TITLE_MAX_LENGTH = 120;
 
 const PAYMENT_PROBLEMS = 20;
+
+/** What the releases screen flags for the merchant to deal with, all from one query. */
+export const FLAGS = [
+  MIXED_PLANS_EVENT,
+  GIFT_INVALID_EVENT,
+  SIGNUP_DEAD_EVENT,
+  DOUBLE_CHARGE_EVENT,
+  DATA_REQUEST_EVENT,
+] as const;
 
 export function parseTitle(raw: FormDataEntryValue | null) {
   const title = typeof raw === "string" ? raw.trim() : "";
@@ -199,7 +216,7 @@ export async function releasesPageData(
     listRunProgress(db, shop.orderTiming, releases),
     listPaymentProblems(db, shop.id),
     db.event.findMany({
-      where: { shopId: shop.id, type: { in: [MIXED_PLANS_EVENT, GIFT_INVALID_EVENT] } },
+      where: { shopId: shop.id, type: { in: [...FLAGS] } },
       orderBy: { createdAt: "desc" },
       take: 10,
       select: { id: true, type: true, payload: true },
@@ -280,6 +297,20 @@ async function cancelWithDeliveries(
         `UPDATE "Release" SET "status" = 'CANCELLED', "updatedAt" = ?3
          WHERE "id" = ?1 AND "shopId" = ?2 AND "status" IN ('UNANNOUNCED', 'PREORDER')
            AND ${NO_ORDERS}`,
+      )
+      .bind(releaseId, shopId, stamp),
+    // A pay-per-release subscriber paused over this release's charge now owes nothing, as if Retry had
+    // been pressed with nothing to charge. A bundle's renewal is still unpaid, and a chargeback stays.
+    rawDb
+      .prepare(
+        `UPDATE "Subscription" SET "status" = 'ACTIVE', "pausedReason" = NULL, "paymentProblemSince" = NULL,
+           "firstReleaseNumber" = ${PAST_REACHED}, "updatedAt" = ?3
+         WHERE "status" = 'PAUSED' AND "pausedReason" = 'FAILED_PAYMENT'
+           AND "planId" IN (SELECT "id" FROM "Plan" WHERE "shopId" = ?2 AND "billingMode" = 'PER_RELEASE')
+           AND "id" IN (SELECT "subscriptionId" FROM "Delivery" WHERE "releaseId" = ?1 AND "status" = 'HELD')
+           AND NOT EXISTS (SELECT 1 FROM "Delivery" d WHERE d."subscriptionId" = "Subscription"."id"
+             AND d."status" = 'HELD' AND d."releaseId" <> ?1)
+           AND EXISTS (SELECT 1 FROM "Release" WHERE "id" = ?1 AND "shopId" = ?2 AND "status" = 'CANCELLED')`,
       )
       .bind(releaseId, shopId, stamp),
     rawDb

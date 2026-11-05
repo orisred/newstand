@@ -14,6 +14,7 @@ import {
   refuseGift,
   sendCardUpdateEmail,
 } from "../portal.server";
+import { limited } from "../rate-limit.server";
 import { authenticate, unauthenticated } from "../shopify.server";
 
 /**
@@ -72,12 +73,16 @@ async function caller(
 const json = (body: unknown, status = 200) =>
   Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
 
+const tooMany = () =>
+  json({ error: "rate_limited", message: "That's a lot of tries. Please wait a while and try again." }, 429);
+
 export const loader = ({ request, context }: LoaderFunctionArgs) =>
   guarded(request, async () => {
     const { env, db, shopDomain, customerGid, graphql } = await caller(
       request,
       context,
     );
+    if (customerGid && (await limited(env.DB, customerGid, "read"))) return tooMany();
     return json(
       (await loadPortal(db, env.DB, graphql, shopDomain, customerGid)) ?? {
         subscriptions: [],
@@ -103,6 +108,7 @@ export const action = ({ request, context }: ActionFunctionArgs) =>
       String(body?.subscriptionId),
     );
     if (!subscription) return json({ error: "not_found" }, 404);
+    if (await limited(env.DB, customerGid, String(body?.intent))) return tooMany();
     const copy = portalCopy({
       singular: subscription.shop.releaseWordSingular,
       plural: subscription.shop.releaseWordPlural,
