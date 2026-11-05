@@ -48,6 +48,7 @@ export type PlanErrors = Partial<
     | "termMonths"
     | "renewalRule"
     | "startRule"
+    | "giftable"
     | "price"
     | "product",
     string
@@ -148,6 +149,13 @@ export function parsePlan(
   const startRule = oneOf(START_RULES, text(form, "startRule"));
   if (!startRule)
     errors.startRule = "Choose which release new subscribers start on.";
+
+  // A gift buys a fixed number of releases. A per-release plan buys one and then charges for each
+  // later one, which a gift never does, so it can't be offered as one.
+  if (form.has("giftable") && billingMode === "PER_RELEASE") {
+    errors.giftable =
+      "Only a prepaid bundle can be bought as a gift. A per-release plan has no fixed number of releases to give.";
+  }
 
   const priceCents = parsePriceCents(text(form, "price"));
   if (priceCents === null) {

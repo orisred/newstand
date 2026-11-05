@@ -18,6 +18,7 @@ import {
   settleAttempt,
 } from "../billing.server";
 import { ensureCartRule } from "../cart-rule.server";
+import { publishGiftPlans } from "../gifts.server";
 import { runEmailSlice } from "../emails.server";
 import { runFlowSlice } from "../flow.server";
 import { runMemberTagSlice } from "../member-tag.server";
@@ -77,6 +78,7 @@ export const jobHandlers: Record<string, JobHandler> = {
     const graphql = await shopGraphql(job.shop);
     await syncPlan(db, graphql, shopId, planId);
     await ensureCartRule(graphql);
+    await publishGiftPlans(db, graphql, shopId);
   },
 
   // One contract's subscription and first release. Queued by its webhooks and the tick.

@@ -15,6 +15,7 @@ import {
   changeAddress,
   cleanAddress,
   confirmAddress,
+  loadPortal,
   ownSubscription,
   PortalError,
   portalCopy,
@@ -1246,5 +1247,123 @@ describe("CORS", () => {
     });
     expect(missing.status).toBe(404);
     expectCors(new Response(null, { headers: missing.headers }));
+  });
+});
+
+// ---- gifts ---------------------------------------------------------------------------------------
+
+describe("a gift in the portal", () => {
+  const BUYER = "gid://shopify/Customer/9001";
+
+  async function gift(s: Setup, data: Record<string, unknown> = {}) {
+    return subscribe(s, {
+      source: "GIFT",
+      giftBuyerGid: BUYER,
+      giftMessage: "<b>Enjoy</b> it!",
+      ...data,
+    });
+  }
+
+  /** The contract as Shopify has it: the buyer's card, and the address the buyer typed for the recipient. */
+  const contractNodes = (id: string) => ({
+    nodes: [
+      {
+        id,
+        deliveryMethod: { address: { firstName: "Ada", address1: "1 Test St", countryCode: "US" } },
+        customerPaymentMethod: { instrument: { brand: "Visa", lastDigits: "1234" } },
+      },
+    ],
+  });
+
+  it("shows the recipient their gift, the message and the address, and never the buyer's card", async () => {
+    const s = await setup();
+    const ordinary = await subscribe(s);
+    const sub = await gift(s, { paymentProblemSince: ago(1) });
+    const read = async (who: string, id: string) =>
+      (await loadPortal(db(), env.DB, async () => async () => contractNodes(id), s.domain, who))!;
+
+    const mine = await read(sub.customerGid, sub.contractGid!);
+    expect(mine.subscriptions).toHaveLength(1);
+    expect(mine.subscriptions[0]).toMatchObject({
+      gift: true,
+      giftMessage: "<b>Enjoy</b> it!",
+      card: null,
+      cardProblem: false,
+      address: { address1: "1 Test St" },
+    });
+    expect(mine.copy.giftNote).toMatch(/never be charged/);
+    expect(JSON.stringify(mine)).not.toMatch(/1234|Visa|ending/);
+    expect(mine.subscriptions[0].cancelNote).toMatch(/nothing for you to cancel/);
+
+    // An ordinary subscription still shows its own card.
+    const control = await read(ordinary.customerGid, ordinary.contractGid!);
+    expect(control.subscriptions[0]).toMatchObject({ gift: false, giftMessage: null, card: "Visa ending 1234" });
+  });
+
+  it("the buyer sees nothing of it in their own account, and can't act on it", async () => {
+    const s = await setup();
+    const sub = await gift(s);
+    const asked: string[] = [];
+    const portal = await loadPortal(
+      db(),
+      env.DB,
+      async () => async (query: string) => void asked.push(query) as any,
+      s.domain,
+      BUYER,
+    );
+    expect(portal!.subscriptions).toEqual([]);
+    expect(asked).toEqual([]); // no subscription of theirs, so Shopify isn't even asked
+    expect(await ownSubscription(db(), s.domain, BUYER, sub.id)).toBeNull();
+    for (const intent of ["cancel", "address", "card", "resume", "confirm"]) {
+      const result = await callPortal(s.domain, BUYER, { intent, subscriptionId: sub.id });
+      expect(result.status, intent).toBe(404);
+      expect(result.sent).toEqual([]);
+    }
+    expect((await db().subscription.findUniqueOrThrow({ where: { id: sub.id } })).status).toBe("ACTIVE");
+  });
+
+  it("refuses the recipient any card action or cancel, before Shopify is asked anything", async () => {
+    const s = await setup();
+    const sub = await gift(s, { paymentProblemSince: ago(1) });
+    for (const [intent, message] of [
+      ["card", /no card or payment/],
+      ["resume", /no card or payment/],
+      ["cancel", /nothing for you to cancel/],
+    ] as const) {
+      // The test Worker has no Shopify session: asking Shopify would be a 500, not this answer.
+      const result = await callPortal(s.domain, sub.customerGid, { intent, subscriptionId: sub.id });
+      expect(result.status, intent).toBe(422);
+      expect(result.json.error).toBe("gift");
+      expect(result.json.message).toMatch(message);
+      expect(result.sent).toEqual([]);
+    }
+    expect((await db().subscription.findUniqueOrThrow({ where: { id: sub.id } })).status).toBe("ACTIVE");
+
+    // And the functions behind them refuse on their own.
+    const fake = shopify();
+    const owned = await own(s, sub);
+    await expect(sendCardUpdateEmail(fake.graphql, owned)).rejects.toMatchObject({ code: "gift" });
+    await expect(cancelSubscription(db(), env.DB, fake.graphql, owned)).rejects.toMatchObject({ code: "gift" });
+    expect(fake.calls).toEqual([]);
+  });
+
+  it("lets the recipient change the address, which is the contract's, and confirm it", async () => {
+    const s = await setup();
+    const sub = await gift(s);
+    const preorder = await release(s, "PREORDER", { preorderOpensAt: ago(1) });
+    await db().delivery.create({ data: { subscriptionId: sub.id, releaseId: preorder.id } });
+    const fake = shopify();
+    await changeAddress(db(), env.DB, fake.graphql, await own(s, sub), {
+      firstName: "Ada",
+      lastName: "L",
+      address1: "2 New St",
+      city: "Town",
+      zip: "10001",
+      countryCode: "US",
+    });
+    const commit = fake.calls.find((call) => call.query.includes("subscriptionDraftUpdate"))!;
+    expect(commit.variables.input.deliveryMethod.shipping.address.address1).toBe("2 New St");
+    expect(fake.calls.every((call) => !call.query.includes("customerPaymentMethod"))).toBe(true);
+    expect(await confirmAddress(db(), env.DB, await own(s, sub), preorder.id)).toBe(true);
   });
 });

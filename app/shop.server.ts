@@ -5,6 +5,7 @@ type Db = ReturnType<typeof createDb>;
 
 export const EMAIL_KEYS = [
   "welcome",
+  "giftReceived",
   "preorderAnnounced",
   "upcomingCharge",
   "failedPayment",

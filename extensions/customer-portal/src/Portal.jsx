@@ -100,6 +100,17 @@ function Subscription({data, subscription, reload}) {
           </s-banner>
         )}
         {cancelled && <s-banner tone="info">This subscription is cancelled.</s-banner>}
+        {subscription.gift && (
+          <>
+            <s-banner tone="info">{copy.giftNote}</s-banner>
+            {subscription.giftMessage && (
+              <s-stack gap="small-200">
+                <s-text color="subdued">{copy.giftMessageLabel}</s-text>
+                <s-text>{subscription.giftMessage}</s-text>
+              </s-stack>
+            )}
+          </>
+        )}
 
         <s-heading>{copy.upcomingHeading}</s-heading>
         {subscription.upcoming.length === 0 ? (
@@ -179,7 +190,7 @@ function Subscription({data, subscription, reload}) {
           </>
         )}
 
-        {!cancelled && (
+        {!cancelled && !subscription.gift && (
           <>
             <s-heading>Payment</s-heading>
             <s-text>{subscription.card ?? 'No card on file'}</s-text>
@@ -205,7 +216,7 @@ function Subscription({data, subscription, reload}) {
           </>
         )}
 
-        {!cancelled && (
+        {!cancelled && !subscription.gift && (
           <>
             <s-heading>Cancel</s-heading>
             {view === 'cancel' ? (

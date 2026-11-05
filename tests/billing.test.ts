@@ -2454,3 +2454,144 @@ describe("contracts from Step 8, with no card and no origin order", () => {
     }
   });
 });
+
+describe("a gift is never charged", () => {
+  const noMoney = (shopify: Shopify) => {
+    expect(shopify.state.creates).toBe(0);
+    expect(shopify.attempts.size).toBe(0);
+  };
+
+  for (const renewalRule of ["TERM_DATE_HOLD_IF_LATE", "TERM_DATE", "ON_DEPLETION"] as const) {
+    it(`${renewalRule}: its releases ship, then the tick, an order and a renewal check leave it alone`, async () => {
+      const shop = await newShop();
+      const shopify = fakeShopify();
+      const plan = await newPlan(shop, { renewalRule });
+      const gift = await newSubscriber(shop, shopify, plan, {
+        source: "GIFT",
+        releasesRemaining: 2,
+        termEndsAt: days(-1),
+      });
+      await install(shop);
+      const first = await newRelease(shop, 1);
+      const second = await newRelease(shop, 2);
+      await drain(shop, shopify, first.id);
+      expect((await row(gift.id)).releasesRemaining).toBe(1);
+      await drain(shop, shopify, second.id);
+      // Both paid releases have shipped and nothing remains: the point at which a bundle renews.
+      expect((await row(gift.id)).releasesRemaining).toBe(0);
+      expect(shopify.orders).toHaveLength(2);
+
+      expect(renewalDue(await row(gift.id), plan, NOW)).toBe(false);
+      expect(await renewIfDue(db(), env.DB, shopify.graphql, gift.id, NOW)).toBeNull();
+      const context = finderContext(days(1));
+      for (const finder of [findRenewals, findRetries, findLostResults]) {
+        expect(jobsFor(await finder(context), gift.id)).toHaveLength(0);
+      }
+      noMoney(shopify);
+      expect(await attemptsOf(gift.id)).toHaveLength(0);
+    });
+  }
+
+  it("a per-release plan's gift is its one paid release: later releases are neither charged nor shipped", async () => {
+    const shop = await newShop();
+    const shopify = fakeShopify();
+    const plan = await newPlan(shop, {
+      billingMode: "PER_RELEASE",
+      releasesPerTerm: 1,
+      termMonths: null,
+    });
+    const gift = await newSubscriber(shop, shopify, plan, {
+      source: "GIFT",
+      releasesRemaining: 1,
+    });
+    const releases = [await newRelease(shop, 1), await newRelease(shop, 2), await newRelease(shop, 3)];
+    for (const release of releases) await drain(shop, shopify, release.id);
+    expect(shopify.orders).toHaveLength(1);
+    expect(await db().delivery.count({ where: { subscriptionId: gift.id } })).toBe(1);
+    noMoney(shopify);
+  });
+
+  describe("the ways a charge can be asked for", () => {
+    // A gift that somehow has a failed term charge on record, and is flagged as a payment problem:
+    // what every retry path would act on for an ordinary subscriber.
+    async function failing(overrides: { status?: SubscriptionStatus; pausedReason?: string } = {}) {
+      const shop = await newShop();
+      const shopify = fakeShopify();
+      const plan = await newPlan(shop, { renewalRule: "TERM_DATE" });
+      const gift = await newSubscriber(shop, shopify, plan, {
+        source: "GIFT",
+        releasesRemaining: 1,
+        termEndsAt: days(-1),
+      });
+      const chargeFor = termChargeFor(days(-1));
+      await db().subscription.update({
+        where: { id: gift.id },
+        data: { paymentProblemSince: days(-2), ...overrides },
+      });
+      const attempt = await db().billingAttempt.create({
+        data: {
+          subscriptionId: gift.id,
+          chargeFor,
+          idempotencyKey: billingAttemptKey(gift.id, chargeFor, 1),
+          attempt: 1,
+          result: "FAILED",
+          errorCode: "CARD_DECLINED",
+          nextRetryAt: days(-1),
+          createdAt: days(-2),
+        },
+      });
+      return { shop, shopify, gift, attempt, chargeFor };
+    }
+
+    it("the scheduled retry", async () => {
+      const { shopify, attempt } = await failing();
+      await retryDue(db(), env.DB, shopify.graphql, attempt.id, NOW);
+      noMoney(shopify);
+    });
+
+    it("the merchant's Retry charge, and the portal's try again", async () => {
+      const { shopify, gift } = await failing({ status: "PAUSED", pausedReason: "FAILED_PAYMENT" });
+      await retryCharge(db(), env.DB, shopify.graphql, gift.id, true, NOW);
+      await retryCharge(db(), env.DB, shopify.graphql, gift.id, false, NOW);
+      noMoney(shopify);
+    });
+
+    it("the buyer saving a new card, and the recipient saving one", async () => {
+      const { shop, shopify, gift } = await failing();
+      // The webhook finds subscriptions by the saving customer, who here is the gift's own customer.
+      expect(await resumeAfterCardUpdate(db(), shop.shopDomain, gift.customerGid, "w1")).toEqual([]);
+      await retryCharge(db(), env.DB, shopify.graphql, gift.id, false, NOW, true);
+      await runResumeJob(
+        db(),
+        env.DB,
+        shopify.graphql,
+        { type: BILLING_RESUME_JOB, id: "x", shop: shop.shopDomain, data: { subscriptionId: gift.id, byMerchant: false, savedCard: true } },
+        NOW,
+      );
+      noMoney(shopify);
+    });
+
+    it("a chargeback ended by the merchant", async () => {
+      const { shopify, gift } = await failing({ status: "PAUSED", pausedReason: "CHARGEBACK" });
+      await retryCharge(db(), env.DB, shopify.graphql, gift.id, true, NOW);
+      noMoney(shopify);
+      expect((await row(gift.id)).pausedReason).toBeNull();
+    });
+
+    it("a charge whose result never arrived is dropped, not sent again", async () => {
+      const { shopify, gift, chargeFor } = await failing();
+      const lost = await db().billingAttempt.create({
+        data: {
+          subscriptionId: gift.id,
+          chargeFor,
+          idempotencyKey: billingAttemptKey(gift.id, chargeFor, 2),
+          attempt: 2,
+          createdAt: days(-1),
+        },
+      });
+      await recoverAttempt(db(), env.DB, shopify.graphql, lost.id, NOW);
+      noMoney(shopify);
+      expect(await db().billingAttempt.findUnique({ where: { id: lost.id } })).toBeNull();
+    });
+  });
+});

@@ -13,9 +13,10 @@ const CUSTOMERS_PER_SLICE = 25;
  * Whether a subscription earns the member discount tag. Active ones do. A cancelled or paused (failed
  * payment) one keeps it while it still has paid releases whose orders haven't been created, and loses it
  * when the last of them is. A chargeback or an ended subscription never does.
+ * A gift never renews, so it stays active in name only: it loses the tag with its last paid release too.
  */
 const QUALIFIES = `s."status" <> 'ENDED' AND NOT ${CHARGEBACK_HOLD}
-  AND (s."status" = 'ACTIVE' OR s."releasesRemaining" > 0)`;
+  AND (s."releasesRemaining" > 0 OR (s."status" = 'ACTIVE' AND s."source" <> 'GIFT'))`;
 
 const TAGS_ADD = `#graphql
   mutation MemberTagAdd($id: ID!, $tags: [String!]!) {

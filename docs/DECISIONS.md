@@ -274,6 +274,47 @@ Technical choices from Step 11 that Steps 12, 13, 15, 16 and 17 live with. Check
 - **A newly saved card skips both rules (N, 2026-11-04).** It retries once, as a merchant's press would, without being the merchant. **A customer who saves a new card and also completes an old bank challenge can be charged twice. N accepted this.** The Step 15 fix below still covers it.
 - **Not fixed (Step 15):** a merchant's press, a saved card, or a retry after 3 days can still double charge. The fix is to ask Shopify whether the challenged attempt is still pending before retrying, and to refuse to credit a second success for one charge and flag it for a refund.
 
+### Gifts (2026-11-05)
+
+Technical and product choices from Step 12 that Steps 13, 15, 16 and 17 live with. Checked on `newstand-dev` with a real test checkout; what couldn't be is listed in the Step 12 report.
+
+**What a gift is**
+
+- **Only a prepaid bundle can be a gift** (`isGiftPlan`: `giftable` and `PREPAID_BUNDLE`). A per-release plan buys one release and then charges for each later one, which a gift never does, so the plan form refuses "giftable" on one with a message, the picker never offers it, and a gift sent for one anyway is read as the buyer's own purchase. This is the conservative reading of a giftable per-release plan; the docs didn't settle it, and N accepted it for now and may review it later. (Rows from before this step with `giftable` on a per-release plan stay as they are and are simply never gifts.)
+- **The contract is the buyer's, the subscription is the recipient's.** The Shopify contract's customer and card are the buyer's. `Subscription.customerGid` is the recipient's, `giftBuyerGid` is the buyer's and `giftMessage` is the buyer's text. The emails, member tag, Flow triggers, portal and the customer on each $0 release order all follow `customerGid`, so they reach the recipient. The delivery address is the contract's, which is whatever the buyer entered as the shipping address at checkout (the picker tells them to enter the recipient's). The recipient can confirm or change it in the portal.
+- **Gift to an existing subscriber** finds their customer by email and gives them a second `Subscription`. Nothing about the customer is changed.
+- **A gift never renews and is never charged.** `attemptCharge` refuses `source` `GIFT` before any Shopify call, which is the one choke point for renewals, per-release charges, `retryDue`, `retryCharge` (merchant and customer), `resumeAfterCardUpdate` (also filtered), the lost-result recovery and the price change. The finders and `DUE_SUBSCRIPTION`/`CHARGE_DUE` already left gifts out; each path has its own test. A gift stays `ACTIVE` after its last release (it has nothing to renew into), so the member tag treats a gift with no paid release left as finished.
+- **A chargeback on a gift's payment order** still pauses and holds it like any subscription (the buyer disputed what funded it). Unchanged, and the merchant ends it with the same button, which charges nothing.
+
+**How the recipient gets in (storefront to contract)**
+
+- **Line item properties** `Gift recipient email`, `Gift recipient name`, `Gift message`, which Shopify copies onto the contract line as `customAttributes` (checked live: they were on the checkout and the contract). Visible keys on purpose, so the buyer sees what they entered in the cart and checkout. The plan picker shows the fields only for a giftable plan once "This is a gift" is ticked and disables them otherwise, so a recipient typed earlier is never sent with another purchase.
+- **Which plans are giftable** reaches the theme through an app-installation metafield, `release_subscriptions.giftable_plans`, written after every plan sync (`publishGiftPlans`) as `,<id>,<id>,` for Liquid to test (checked live: the picker marked only the giftable plan). A failure never blocks the sync.
+- **The checkout rule** (`one-plan-per-cart`) also blocks a gift beside any other subscription line (lines of one plan share a contract, so a second recipient would be paid for and lost) and a gift with no valid email, so the buyer is told before paying. Checked live: both answer 422 on `/cart/add.js`. Stores that can't run Functions (Basic, custom app) get only the server-side check below.
+- **The server treats it all as untrusted** (`parseGift`): one plain address only (no names, quotes, separators or control characters), a name cleaned and cut to 100 characters, a message cleaned of control characters and cut to 500. A name or message without an email is invalid. The message is plain text everywhere: escaped in the emails and rendered as text by the portal, and the email labels it as written by the sender, not the shop.
+- **The recipient's customer** is found by email, else created with the email and name (`customerCreate`). A second run, or two at once, finds the first's customer (Shopify allows an email on one customer; the loser's create is refused and it searches again). The email and name go to Shopify only: the app stores none, logs none, and puts none in a flag.
+- **A gift that can't be delivered fails visibly.** If the recipient is missing or invalid, Shopify refuses the address, or the gift shares a contract with another line, no subscription is created (making the buyer's own would send it to the wrong person), the payment order stays unfulfilled, and an Event `contract.gift_invalid` shows a red banner on the releases screen with the order link and what to do (contact the buyer, then refund the order or cancel the contract in Shopify). "Mark as handled" clears it, shared with the mixed-plans flag. **The buyer is told nothing by the app**, because there is no subscription to send an email for; the checkout rule is what normally stops it.
+
+**Portal and cancel**
+
+- The portal acts on `customerGid`, so only the recipient sees a gift and the buyer sees none of it. A gift shows the recipient its note, the buyer's message (as text), upcoming releases and the address, and **no card, no card actions, no payment problem and no cancel**. The card and "try again" refusals, and the cancel refusal, happen before Shopify is asked anything (`refuseGift`).
+- **Cancel on a gift (conservative option, raised for N):** a recipient can't cancel. Cancelling ends the buyer's contract, refunds nothing and still ships every paid release, so it would change nothing for the recipient and touch a contract they don't own. The portal says there is nothing to cancel and to contact the shop if they don't want it. The merchant can still cancel the contract in Shopify.
+
+**Emails and triggers**
+
+| Email | Gift |
+| --- | --- |
+| Gift received (`giftReceived`, new, own switch, to the recipient, with the message) | Sent after sign-up, with where to sign in to check the address |
+| Welcome | Never (`source` is not `NEW`) |
+| Pre-order announced | To the recipient, as for any subscriber |
+| Last release shipping | To the recipient. For a gift it is also the end-of-gift offer: says it won't renew, that they won't be charged, how to subscribe (the shop's address) and where to sign in. It uses the `lastReleaseShipping` switch, with no switch of its own for the offer |
+| Upcoming charge, failed payment, price change | Never, checked at queue time and again at send time |
+
+- The buyer gets nothing from the app. Shopify's own order confirmation on the payment order still goes to them (accepted exception).
+- Flow's "Subscription started" and "Last release shipped" go with the recipient's customer ID. The member tag goes to the recipient while paid releases remain.
+
+**GDPR:** `customers/data_request` already matched `customerGid` or `giftBuyerGid`, so a buyer and a recipient each get the gift (with its message) in their export. `customers/redact` for the buyer clears `giftBuyerGid` and the message and leaves the recipient's subscription running; for the recipient it ends the subscription, erases the message, their email rows and their tag. A new `giftReceived` row is an `EmailSend` row like any other.
+
 ## Cake Zine facts
 
 - 1 to 2 issues a year; 250 to 1,000 active subscribers.

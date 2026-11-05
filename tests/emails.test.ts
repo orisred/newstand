@@ -169,6 +169,9 @@ const SCENARIOS: Record<EmailKey, (s: Setup) => Promise<void>> = {
   welcome: async (s) => {
     await subscribe(s, { createdAt: ago(0.1) });
   },
+  giftReceived: async (s) => {
+    await subscribe(s, { source: "GIFT", giftBuyerGid: "gid://shopify/Customer/9", createdAt: ago(0.1) });
+  },
   preorderAnnounced: async (s) => {
     await release(s, "PREORDER");
     await subscribe(s);
@@ -739,7 +742,10 @@ describe("copy", () => {
     { kind: "upcomingCharge", plan: "Yearly", amount: "$40.00", portalUrl: PORTAL, when: { held: new Date("2027-03-01T10:00:00Z") } },
     { kind: "failedPayment", plan: "Yearly", retryOn: new Date("2026-11-10T10:00:00Z"), cardUrl: "https://a.test/l/y" },
     { kind: "failedPayment", plan: "Yearly", retryOn: null, cardUrl: "https://a.test/l/y" },
-    { kind: "lastReleaseShipping", plan: "Yearly", release: "Zine 4" },
+    { kind: "lastReleaseShipping", plan: "Yearly", release: "Zine 4", gift: false, portalUrl: PORTAL },
+    { kind: "lastReleaseShipping", plan: "Yearly", release: "Zine 4", gift: true, portalUrl: PORTAL },
+    { kind: "giftReceived", plan: "Yearly", message: "Happy <b>birthday</b>", portalUrl: PORTAL },
+    { kind: "giftReceived", plan: "Yearly", message: null, portalUrl: PORTAL },
     { kind: "priceChange", plan: "Yearly", oldAmount: "$40.00", newAmount: "$50.00", effectiveAt: new Date("2026-12-04T10:00:00Z"), portalUrl: PORTAL },
   ];
 
@@ -841,5 +847,119 @@ describe("address confirmation", () => {
     // And clicking again later keeps the first time.
     await recordAddressConfirmation(env.DB, sub.id, rel.id, NOW);
     expect((await db().delivery.findUniqueOrThrow({ where: { id: delivery.id } })).addressConfirmedAt?.getTime()).toBe(ago(0.01).getTime());
+  });
+});
+
+// ---- gifts ---------------------------------------------------------------------------------------
+
+describe("emails for a gift", () => {
+  const BUYER = "gid://shopify/Customer/9001";
+  const gift = (s: Setup, data: Record<string, unknown> = {}) =>
+    subscribe(s, { source: "GIFT", giftBuyerGid: BUYER, giftMessage: "Enjoy it!", ...data });
+
+  it("tells the recipient, with the buyer's message quoted and labelled, and the buyer gets nothing from the app", async () => {
+    const s = await setupShop();
+    const sub = await gift(s, { createdAt: ago(0.1) });
+    const m = mailer();
+    await runAll(s, m, shopify({ [sub.customerGid]: "recipient@e.test", [BUYER]: "buyer@e.test" }).graphql);
+    expect(m.sent.map((message) => message.to)).toEqual(["recipient@e.test"]);
+    const [message] = m.sent;
+    expect(message.subject).toBe("You've been given a subscription to Test Zines");
+    expect(message.text).toContain("Their message (written by the sender, not by Test Zines):");
+    expect(message.text).toContain("“Enjoy it!”");
+    expect(message.text).toContain("never be charged");
+    // No welcome: that is for someone who subscribed.
+    expect((await rows(s.shop.id)).map((row) => row.kind)).toEqual(["giftReceived"]);
+  });
+
+  it("escapes the message, and keeps it out of the subject and the sender", () => {
+    const hostile = "<img src=x onerror=alert(1)>\" onmouseover=\"x\"\r\nSubject: spam";
+    const out = renderEmail(
+      { name: "Shop", url: "https://s.test", singular: "drop", plural: "drops", timezone: null, address: null },
+      { kind: "giftReceived", plan: "Yearly", message: hostile, portalUrl: "https://s.test/account" },
+    );
+    expect(out.html).not.toContain("<img");
+    expect(out.html).toContain("&#60;img src=x onerror=alert(1)&#62;");
+    expect(out.html).not.toContain('onmouseover="');
+    expect(out.subject).not.toContain("spam");
+    expect(out.subject).not.toMatch(/[\r\n]/);
+  });
+
+  it("goes to the recipient for the pre-order and for the last release, which is also the end-of-gift offer", async () => {
+    const s = await setupShop({ releaseWordSingular: "drop", releaseWordPlural: "drops" });
+    const waiting = await gift(s);
+    const ending = await gift(s, { releasesRemaining: 0 });
+    await release(s, "PREORDER");
+    const last = await release(s, "READY");
+    await db().delivery.create({
+      data: { subscriptionId: ending.id, releaseId: last.id, status: "ORDERED", orderGid: `gid://shopify/Order/${++n}`, updatedAt: ago(0.1) },
+    });
+    const m = mailer();
+    await runAll(
+      s,
+      m,
+      shopify({
+        [waiting.customerGid]: "waiting@e.test",
+        [ending.customerGid]: "ending@e.test",
+        [BUYER]: "buyer@e.test",
+      }).graphql,
+    );
+    expect(m.sent.map((message) => message.to).sort()).toEqual(["ending@e.test", "waiting@e.test"]);
+    const byKind = Object.fromEntries((await rows(s.shop.id)).map((row) => [row.kind, row.status]));
+    expect(byKind).toMatchObject({ preorderAnnounced: "SENT", lastReleaseShipping: "SENT" });
+    const end = m.sent.find((message) => message.subject.startsWith("Your last gift"))!;
+    expect(end.to).toBe("ending@e.test");
+    expect(end.text).toContain("won't be charged");
+    expect(end.text).toContain("https://zines.test");
+    expect(end.text).toContain("Sign in with this email address");
+    expect(end.text).toMatch(/shopify\.com\/.*account/);
+    expect(end.text + end.html + end.subject).not.toMatch(/issue/i);
+  });
+
+  it("the end-of-gift offer can be switched off, like the last-release email it is", async () => {
+    const s = await setupShop({ emailsEnabled: { lastReleaseShipping: false } });
+    const sub = await gift(s, { releasesRemaining: 0 });
+    const last = await release(s, "READY");
+    await db().delivery.create({
+      data: { subscriptionId: sub.id, releaseId: last.id, status: "ORDERED", orderGid: `gid://shopify/Order/${++n}`, updatedAt: ago(0.1) },
+    });
+    const m = mailer();
+    await runAll(s, m, shopify({ [sub.customerGid]: "recipient@e.test" }).graphql);
+    expect(m.sent).toHaveLength(0);
+    expect((await rows(s.shop.id, "lastReleaseShipping"))[0]).toMatchObject({ status: "SKIPPED", reason: "switched_off" });
+  });
+
+  it("never sends an upcoming charge, a failed payment or a price change", async () => {
+    const s = await setupShop();
+    await release(s, "PREORDER");
+    const sub = await gift(s, { termEndsAt: ahead(10), lockedPriceCents: 4000, paymentProblemSince: ago(0.5) });
+    await db().event.create({
+      data: {
+        id: `billing.failed:${sub.id}`,
+        shopId: s.shop.id,
+        subscriptionId: sub.id,
+        type: "billing.failed",
+        payload: { nextRetryAt: null },
+        createdAt: ago(0.1),
+      },
+    });
+    await db().priceChange.create({
+      data: { planId: s.plan.id, newPriceCents: 5000, policy: "APPLY_AT_RENEWAL", effectiveAt: ahead(30), createdAt: ago(0.2) },
+    });
+    await queueEmails(env.DB, s.shop.id, NOW);
+    const queued = (await rows(s.shop.id)).map((row) => row.kind);
+    for (const kind of ["upcomingCharge", "failedPayment", "priceChange"]) expect(queued).not.toContain(kind);
+
+    // And one already queued before the subscription became a gift's is dropped at send time.
+    for (const kind of ["upcomingCharge", "failedPayment", "priceChange"] as const) {
+      const row = {
+        id: "x", kind, subject: "on:2027-01-01", attempts: 0, subscriptionId: sub.id, contractGid: "c",
+        status: "ACTIVE", customerGid: sub.customerGid, source: "GIFT", releasesRemaining: 1, pausedReason: null,
+        paymentProblemSince: ago(1).toISOString(), quantity: 1, giftMessage: null, lockedPriceCents: 4000,
+        termEndsAt: null, createdAt: ago(100).toISOString(), planId: s.plan.id, displayName: "Y", priceCents: 4000,
+        currency: "USD", autoRenew: 1, releasesPerTerm: 2,
+      } as any;
+      expect(staleReason(row, { emailsEnabled: {} }, { now: NOW, change: { id: "p", planId: s.plan.id, newPriceCents: 1, effectiveAt: ahead(9) }, latestChange: { id: "p", planId: s.plan.id, newPriceCents: 1, effectiveAt: ahead(9) } }), kind).not.toBeNull();
+    }
   });
 });
