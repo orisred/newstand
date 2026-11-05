@@ -1,5 +1,5 @@
-import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useLoaderData } from "react-router";
+import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
+import { useFetcher, useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import {
   customerLabel,
@@ -10,6 +10,7 @@ import {
 } from "../dashboard.server";
 import { formatMoney, idOf, stateOf, whenText } from "../dashboard-format";
 import { createDb } from "../db.server";
+import { releaseImportHold } from "../import.server";
 import { graphqlOf } from "../plan-sync.server";
 import { capitalize } from "../release-actions";
 import { getOrCreateShop } from "../shop.server";
@@ -56,6 +57,10 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
       subscription.signupCents === null ? null : formatMoney(subscription.signupCents, currency),
     pausedReason: subscription.pausedReason,
     problemSince: when(subscription.paymentProblemSince),
+    imported: subscription.source === "IMPORTED",
+    noCardSince: when(subscription.noCardSince),
+    depleting: subscription.plan.renewalRule === "ON_DEPLETION",
+    zeroPrice: subscription.lockedPriceCents === 0,
     deliveries: deliveries.map((d) => ({
       ...d,
       confirmed: when(d.addressConfirmedAt),
@@ -80,6 +85,14 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
   };
 };
 
+/** A merchant lets a subscriber held by the import go live. */
+export const action = async ({ request, context, params }: ActionFunctionArgs) => {
+  const { session } = await authenticate.admin(request);
+  const { env } = context.cloudflare;
+  const shop = await getOrCreateShop(createDb(env.DB), session.shop);
+  return { released: await releaseImportHold(env.DB, shop.id, String(params.id)) };
+};
+
 const DELIVERY_TEXT = {
   PENDING: "Waiting for its order",
   ORDERED: "Order created",
@@ -99,11 +112,42 @@ const EMAIL_TONE = {
 
 export default function Subscriber() {
   const s = useLoaderData<typeof loader>();
+  const release = useFetcher<typeof action>();
   return (
     <s-page heading={s.customer.name}>
       <s-link slot="breadcrumb-actions" href="/app/subscribers">
         Subscribers
       </s-link>
+      {s.noCardSince && (
+        <s-banner tone="critical" heading="No card on this contract">
+          <s-paragraph>
+            Imported with no saved card, so the next charge will fail, retry and then pause. A card
+            the customer saves is picked up just before the charge.
+          </s-paragraph>
+        </s-banner>
+      )}
+      {s.pausedReason === "IMPORT_HOLD" && (
+        <s-banner tone="warning" heading="On hold from the import">
+          <s-stack gap="small">
+            <s-paragraph>
+              Nothing is charged while it&apos;s on hold, and paid {s.plural} still ship. Check the
+              old app has stopped charging this subscriber first.{" "}
+              {s.depleting
+                ? "This plan renews when paid releases run out, so with none left, releasing it charges within the hour, with no notice sent."
+                : "Releasing it moves a term date less than 22 days away out to 22 days from now, so the upcoming-charge notice goes first."}
+              {s.zeroPrice &&
+                " Their last purchase cost nothing, so this contract's price is $0 and it renews for nothing. Releasing the hold doesn't change that."}
+            </s-paragraph>
+            <s-button
+              variant="primary"
+              {...(release.state !== "idle" ? { loading: true } : {})}
+              onClick={() => release.submit({}, { method: "post" })}
+            >
+              Release hold
+            </s-button>
+          </s-stack>
+        </s-banner>
+      )}
       <s-section heading="Subscription">
         <s-stack gap="small">
           <s-stack direction="inline" gap="small">
@@ -118,8 +162,10 @@ export default function Subscriber() {
           <s-text>Copies of each {s.word}: {s.quantity}</s-text>
           <s-text>Paid {s.word} still to ship: {s.remaining}</s-text>
           <s-text>Term ends: {s.perRelease ? "Per release, no term" : (s.termEnds ?? "None")}</s-text>
-          <s-text>Signed up: {s.since}</s-text>
-          <s-text>Paid at sign-up: {s.paidAtSignup ?? "Not read from Shopify yet"}</s-text>
+          <s-text>{s.imported ? "Imported" : "Signed up"}: {s.since}</s-text>
+          <s-text>
+            Paid at sign-up: {s.imported ? "Before the import, in the old app" : (s.paidAtSignup ?? "Not read from Shopify yet")}
+          </s-text>
           {s.problemSince && <s-text>Payment problem since: {s.problemSince}</s-text>}
         </s-stack>
       </s-section>

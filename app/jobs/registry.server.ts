@@ -20,6 +20,13 @@ import {
 import { ensureCartRule } from "../cart-rule.server";
 import { DASHBOARD_JOB, dashboardJob, refreshDashboard } from "../dashboard.server";
 import { publishGiftPlans } from "../gifts.server";
+import {
+  findImportWork,
+  IMPORT_CREATE_JOB,
+  IMPORT_READ_JOB,
+  runCreateSlice,
+  runReadSlice,
+} from "../import.server";
 import { runEmailSlice } from "../emails.server";
 import { runFlowSlice } from "../flow.server";
 import { runMemberTagSlice } from "../member-tag.server";
@@ -208,6 +215,17 @@ export const jobHandlers: Record<string, JobHandler> = {
     await refreshDashboard(db, env.DB, await shopGraphql(job.shop), job.shop!);
   },
 
+  // One slice of a dry run, then of a real run. Each ends by enqueueing the next, never by failing on a limit.
+  [IMPORT_READ_JOB]: async (job, { db, env }) => {
+    const next = await runReadSlice(db, env.DB, () => shopGraphql(job.shop), job);
+    if (next) await enqueueJobs(env, [next.job], next.delaySeconds);
+  },
+
+  [IMPORT_CREATE_JOB]: async (job, { db, env }) => {
+    const next = await runCreateSlice(db, env.DB, () => shopGraphql(job.shop), job);
+    if (next) await enqueueJobs(env, [next.job], next.delaySeconds);
+  },
+
   [GDPR_JOB]: async (job, { db, env }) => {
     const { topic, shopDomain, customerGid, requestId } = job.data ?? {};
     if (typeof shopDomain !== "string") throw new Error("gdpr job without a shop");
@@ -260,4 +278,5 @@ export const dueWorkFinders: DueWorkFinder[] = [
   findRenewals,
   findRetries,
   findLostResults,
+  findImportWork,
 ];

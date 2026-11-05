@@ -40,6 +40,7 @@ export async function recordDataRequest(
       lockedPriceCents: true,
       giftMessage: true,
       createdAt: true,
+      noCardSince: true,
       plan: { select: { displayName: true } },
       billingAttempts: {
         select: { attempt: true, result: true, errorCode: true, orderGid: true, createdAt: true },
@@ -57,6 +58,10 @@ export async function recordDataRequest(
       },
     },
   });
+  const importRows = await db.importRow.findMany({
+    where: { shopId: shop.id, customerGid },
+    select: { state: true, category: true, flags: true, facts: true, contractGid: true, createdAt: true },
+  });
   await rawDb
     .prepare(
       `INSERT INTO "Event" ("id", "shopId", "type", "payload")
@@ -66,7 +71,7 @@ export async function recordDataRequest(
       `${DATA_REQUEST_EVENT}:${shop.id}:${requestId}`,
       shop.id,
       DATA_REQUEST_EVENT,
-      JSON.stringify({ requestId, customerGid, subscriptions }),
+      JSON.stringify({ requestId, customerGid, subscriptions, importRows }),
     )
     .run();
   logEvent("info", "gdpr.data_request", {
@@ -95,6 +100,17 @@ export async function redactCustomer(
   const stamp = new Date().toISOString();
   const held = `SELECT "id" FROM "Subscription" WHERE "shopId" = ?1 AND "customerGid" = ?2`;
   await rawDb.batch([
+    // Kept, under a key with no ID of theirs in it, so the report still says what became of the line,
+    // and a job holding the row can see it has gone.
+    rawDb
+      .prepare(
+        `UPDATE "ImportRow" SET "key" = 'redacted:' || "id", "customerGid" = 'redacted', "category" = 'REDACTED',
+           "state" = CASE WHEN "state" = 'DONE' THEN 'DONE' ELSE 'SKIPPED' END,
+           "contactCancelled" = 0, "flags" = '[]', "facts" = '{}', "contractGid" = NULL, "subscriptionId" = NULL,
+           "leaseUntil" = NULL, "updatedAt" = ?3
+         WHERE "shopId" = ?1 AND "customerGid" = ?2`,
+      )
+      .bind(shop.id, customerGid, stamp),
     rawDb
       .prepare(
         `DELETE FROM "Event" WHERE "shopId" = ?1 AND ("subscriptionId" IN (${held})
@@ -161,6 +177,8 @@ export async function redactShop(
         `DELETE FROM "Event" WHERE "shopId" = ?1`,
         `DELETE FROM "EmailSend" WHERE "shopId" = ?1`,
         `DELETE FROM "MemberTag" WHERE "shopId" = ?1`,
+        `DELETE FROM "ImportRow" WHERE "shopId" = ?1`,
+        `DELETE FROM "ImportRun" WHERE "shopId" = ?1`,
         `DELETE FROM "BillingAttempt" WHERE "subscriptionId" IN ${subscriptions}`,
         `DELETE FROM "Delivery" WHERE "subscriptionId" IN ${subscriptions}`,
         `DELETE FROM "Subscription" WHERE "shopId" = ?1`,

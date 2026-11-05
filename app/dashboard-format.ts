@@ -23,10 +23,19 @@ export const STATUS_TEXT = {
 } as const;
 
 /** What the merchant sees for a subscription: a finished gift reads as finished, not active. */
-export function stateOf(row: { status: string; releasesRemaining: number; finished: number | boolean }) {
+export function stateOf(row: {
+  status: string;
+  releasesRemaining: number;
+  finished: number | boolean;
+  pausedReason?: string | null;
+}) {
   if (row.status === "ACTIVE" && row.finished) return { text: "Finished", tone: "neutral" } as const;
   if (row.status === "ACTIVE") return { text: "Active", tone: "success" } as const;
-  if (row.status === "PAUSED") return { text: "Paused", tone: "critical" } as const;
+  if (row.status === "PAUSED") {
+    return row.pausedReason === "IMPORT_HOLD"
+      ? ({ text: "On hold from import", tone: "warning" } as const)
+      : ({ text: "Paused", tone: "critical" } as const);
+  }
   if (row.status === "CANCELLED") {
     return row.releasesRemaining > 0
       ? ({ text: "Cancelled, still shipping", tone: "warning" } as const)
@@ -35,7 +44,7 @@ export function stateOf(row: { status: string; releasesRemaining: number; finish
   return { text: "Ended", tone: "neutral" } as const;
 }
 
-export const VIEWS = ["all", "live", "paused", "ending", "finished", "gifts"] as const;
+export const VIEWS = ["all", "live", "paused", "onHold", "noCard", "ending", "finished", "gifts"] as const;
 export type View = (typeof VIEWS)[number];
 
 export const parseView = (raw: string | null): View =>

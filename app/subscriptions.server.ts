@@ -31,6 +31,15 @@ export const RELEASE_RUN_JOB = "release.run";
 export const RELEASE_FIRE_JOB = "release.fire";
 
 /**
+ * On every contract the import creates, as a custom attribute on the contract in Shopify. It is what
+ * says "not a sign-up". It has to live there: the webhook can beat the importer's D1 write, and a crash
+ * can leave a contract with no row at all. Its value is the import row's key.
+ */
+export const IMPORT_MARKER = "_release_subscriptions_import";
+/** `pausedReason` of an imported subscriber waiting for a merchant: paid releases ship, nothing is charged. */
+export const IMPORT_HOLD = "IMPORT_HOLD";
+
+/**
  * A closed contract. Paid releases still ship, and a chargeback stays flagged, but nothing is
  * charged again, so what's held or waiting for a payment is closed too. Safe to repeat.
  */
@@ -172,6 +181,7 @@ const CONTRACT = `#graphql
       createdAt
       customer { id }
       originOrder { id name }
+      customAttributes { key }
       lines(first: 50) { nodes { quantity sellingPlanId currentPrice { amount } customAttributes { key value } } }
     }
   }`;
@@ -332,10 +342,17 @@ export async function syncContract(
 
   let subscription = await db.subscription.findUnique({
     where: { contractGid },
-    select: { id: true, status: true },
+    select: { id: true, status: true, source: true },
   });
 
   if (!subscription) {
+    // The importer writes its own Subscription and picks up after a crash. Never a sign-up: no first
+    // order, no welcome, no `subscription.started`, no payment order, whichever arrives first.
+    const attributes = (contract.customAttributes ?? []) as { key: string }[];
+    if (attributes.some(({ key }) => key === IMPORT_MARKER)) {
+      logEvent("info", "contract.import_pending", { contractGid });
+      return [];
+    }
     const planLines = lines.filter(
       (line) => line.sellingPlanId === plan.sellingPlanGid,
     );
@@ -446,7 +463,7 @@ export async function syncContract(
     ]);
     subscription = await db.subscription.findUniqueOrThrow({
       where: { contractGid },
-      select: { id: true, status: true },
+      select: { id: true, status: true, source: true },
     });
   } else {
     const status = statusFor(contract.status, subscription.status);
@@ -465,9 +482,14 @@ export async function syncContract(
     select: { id: true, release: { select: { status: true } } },
   });
   return [
-    // The welcome email and the member tag needn't wait for the tick. Both read state, so they're repeatable.
-    emailRunJob(shop.shopDomain, `signup:${contractGid}`),
-    memberTagJob(shop.shopDomain, `signup:${contractGid}`),
+    // The welcome email and the member tag needn't wait for the tick. Both read state, so they're
+    // repeatable. Not for an import: a thousand contracts must not mean a thousand of each.
+    ...(subscription.source === "IMPORTED"
+      ? []
+      : [
+          emailRunJob(shop.shopDomain, `signup:${contractGid}`),
+          memberTagJob(shop.shopDomain, `signup:${contractGid}`),
+        ]),
     ...(contract.originOrder
       ? [paymentOrderJob(shop.shopDomain, contract.originOrder.id)]
       : []),
