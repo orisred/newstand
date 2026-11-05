@@ -157,6 +157,19 @@ const DRAFT_COMMIT = `#graphql
     }
   }`;
 
+const SAVED_CARD = `#graphql
+  query ImportedContractCard($contract: ID!, $customer: ID!) {
+    subscriptionContract(id: $contract) { customerPaymentMethod { id } }
+    customer(id: $customer) { paymentMethods(first: 1, showRevoked: false) { nodes { id } } }
+  }`;
+
+const DRAFT_CARD = `#graphql
+  mutation ImportedDraftCard($draft: ID!, $input: SubscriptionDraftInput!) {
+    subscriptionDraftUpdate(draftId: $draft, input: $input) {
+      userErrors { message }
+    }
+  }`;
+
 const ORDER_CONTRACTS = `#graphql
   query DisputedOrder($id: ID!) {
     order(id: $id) { lineItems(first: 50) { nodes { contract { id } } } }
@@ -203,6 +216,7 @@ async function applyPriceChange(
     id: string;
     contractGid: string;
     planId: string;
+    source: string;
     sellingPlanGid: string | null;
     createdAt: Date;
     lockedPriceCents: number | null;
@@ -219,6 +233,8 @@ async function applyPriceChange(
     change.policy !== "APPLY_AT_RENEWAL" ||
     change.effectiveAt > now ||
     subscription.createdAt >= change.effectiveAt ||
+    // Imported after the change was saved, so its notice never reached them. They keep what they pay.
+    (subscription.source === "IMPORTED" && subscription.createdAt > change.createdAt) ||
     subscription.lockedPriceCents === change.newPriceCents
   ) {
     return;
@@ -256,6 +272,40 @@ async function applyPriceChange(
   });
 }
 
+/**
+ * A contract imported with no card has nothing that would ever put one on it: a card saved since is
+ * the customer's, not the contract's. So just before a charge, it takes the customer's saved card if
+ * they now have one. With none, the charge goes ahead and fails as `PAYMENT_METHOD_NOT_SPECIFIED`, and
+ * the usual retries and pause follow.
+ */
+async function attachSavedCard(
+  db: Db,
+  graphql: Graphql,
+  subscriptionId: string,
+  contractGid: string,
+  customerGid: string,
+) {
+  const { subscriptionContract: contract, customer } = await graphql(SAVED_CARD, {
+    contract: contractGid,
+    customer: customerGid,
+  });
+  const card = customer?.paymentMethods.nodes[0]?.id as string | undefined;
+  if (!contract?.customerPaymentMethod) {
+    if (!card) return;
+    const { subscriptionContractUpdate: opened } = await graphql(DRAFT_OPEN, { contract: contractGid });
+    if (opened.userErrors.length > 0) throw new Error("Shopify refused a contract draft");
+    const { subscriptionDraftUpdate: updated } = await graphql(DRAFT_CARD, {
+      draft: opened.draft.id,
+      input: { paymentMethodId: card },
+    });
+    if (updated.userErrors.length > 0) throw new Error("Shopify refused the saved card");
+    const { subscriptionDraftCommit: committed } = await graphql(DRAFT_COMMIT, { draft: opened.draft.id });
+    if (committed.userErrors.length > 0) throw new Error("Shopify refused the saved card");
+    logEvent("info", "billing.card_attached", { subscriptionId });
+  }
+  await db.subscription.updateMany({ where: { id: subscriptionId }, data: { noCardSince: null } });
+}
+
 export type ChargeResult =
   | "sent"
   | "already" // this try has finished, so it can't be sent again
@@ -286,6 +336,8 @@ async function attemptCharge(
       source: true,
       pausedReason: true,
       contractGid: true,
+      customerGid: true,
+      noCardSince: true,
       createdAt: true,
       lockedPriceCents: true,
       planId: true,
@@ -323,6 +375,10 @@ async function attemptCharge(
     return "contract_not_active";
   }
 
+  if (subscription.noCardSince) {
+    await attachSavedCard(db, graphql, subscriptionId, contractGid, subscription.customerGid);
+  }
+
   const key = billingAttemptKey(subscriptionId, chargeFor, attempt);
   const existing = await db.billingAttempt.findUnique({
     where: { idempotencyKey: key },
@@ -339,6 +395,7 @@ async function attemptCharge(
           id: subscriptionId,
           contractGid,
           planId: subscription.planId,
+          source: subscription.source,
           sellingPlanGid: subscription.plan.sellingPlanGid,
           createdAt: subscription.createdAt,
           lockedPriceCents: subscription.lockedPriceCents,

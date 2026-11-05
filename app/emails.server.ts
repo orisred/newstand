@@ -18,6 +18,7 @@ import type { Graphql } from "./plan-sync.server";
 import { CHARGE_DUE, CHARGEBACK_HOLD, DUE_SUBSCRIPTION } from "./release-runs.server";
 import { emailRunJob } from "./notification-jobs";
 import { type EmailKey, isEmailEnabled } from "./shop.server";
+import { IMPORT_HOLD } from "./subscriptions.server";
 
 type Db = ReturnType<typeof createDb>;
 type EmailEnv = Pick<
@@ -144,7 +145,9 @@ const QUEUES: string[] = [
        AND s."termEndsAt" IS NOT NULL
        AND julianday(s."termEndsAt") > julianday(?2)
        AND julianday(s."termEndsAt") <= julianday(?2) + ${RENEWAL_NOTICE_DAYS}
-       AND julianday(s."createdAt") < julianday(s."termEndsAt") - ${RENEWAL_NOTICE_DAYS}`,
+       AND julianday(s."createdAt") < julianday(s."termEndsAt") - ${RENEWAL_NOTICE_DAYS}
+       -- Two or more paid releases left can't ship by then, so the hold rule won't charge on this date.
+       AND (p."renewalRule" = 'TERM_DATE' OR s."releasesRemaining" <= 1)`,
     enabled("upcomingCharge"),
   ),
   // Undated: a charge that happens when a release starts shipping, which can have no date, so the
@@ -157,8 +160,13 @@ const QUEUES: string[] = [
      WHERE ${PREORDER_OPEN} AND sh."orderTiming" = 'READY_TO_SHIP' AND ${BASE}
        AND s."firstReleaseNumber" <= r."number"
        AND ((${CHARGE_DUE})
-         OR (${RENEWING} AND p."billingMode" = 'PREPAID_BUNDLE' AND p."renewalRule" = 'ON_DEPLETION'
-             AND s."releasesRemaining" = 1 AND NOT ${PENDING_DELIVERY}))`,
+         OR (${RENEWING} AND p."billingMode" = 'PREPAID_BUNDLE' AND s."releasesRemaining" = 1
+             AND NOT ${PENDING_DELIVERY}
+             AND (p."renewalRule" = 'ON_DEPLETION'
+               -- A renewal already on hold charges with this release's order, which can be long after
+               -- the term date and the one notice that went then.
+               OR (p."renewalRule" = 'TERM_DATE_HOLD_IF_LATE'
+                 AND julianday(s."termEndsAt") <= julianday(r."preorderOpensAt")))))`,
     enabled("upcomingCharge"),
   ),
   // Late: the term date passed with a paid release still to ship, so the renewal is on hold.
@@ -399,7 +407,8 @@ async function dataFor(row: Row, ctx: SendContext): Promise<EmailData> {
       return {
         kind: "preorderAnnounced",
         release: release(row.subject),
-        paused: row.status === "PAUSED",
+        // A hold is the merchant's, and there's nothing wrong with the card.
+        paused: row.status === "PAUSED" && row.pausedReason !== IMPORT_HOLD,
         ordersNow: ctx.ordersNow,
         addressUrl: await linkUrl(
           env,

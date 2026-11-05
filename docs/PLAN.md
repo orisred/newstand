@@ -81,7 +81,7 @@ Prisma models are in `prisma/schema.prisma`.
 
 ## Migration from Conjured
 
-- Conjured exports contacts only. Rebuild each subscriber's term from Shopify order history: last annual purchase, plan bought, issues shipped since.
+- Conjured exports contacts only. Rebuild each subscriber from Shopify order history: the last annual purchase gives the term and plan, and unused paid issues from earlier purchases carry forward (N, 2026-11-05: "if you were charged for 2 you should get 2"; see "Migration import" in `DECISIONS.md`).
 - Our app can't read Conjured's contracts through the API. Create new contracts against each customer's saved Shopify Payments card; confirm this works on a dev store first.
 - 250 to 1,000 subscribers: spot-check the rebuilt list by hand.
 - Cut over before the next issue run (more than 3 months away as of 2026-11-01). Switch off Conjured renewals at cutover.

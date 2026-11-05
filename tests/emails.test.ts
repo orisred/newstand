@@ -278,6 +278,8 @@ describe("who is due each email", () => {
       pausedReason: "FAILED_PAYMENT",
       paymentProblemSince: ago(2),
     });
+    // Held by an import: nothing's wrong with the card, so the email mustn't say there is.
+    const held = await subscribe(s, { status: "PAUSED", pausedReason: "IMPORT_HOLD", source: "IMPORTED" });
     const perRelease = await db().plan.create({
       data: { shopId: s.shop.id, name: "PR", displayName: "Per release", priceCents: 1000, billingMode: "PER_RELEASE" },
     });
@@ -299,10 +301,12 @@ describe("who is due each email", () => {
     await runAll(s, m, shopify(customers).graphql);
     const due = await rows(s.shop.id, "preorderAnnounced");
     expect(due.map((row) => row.subscriptionId).sort()).toEqual(
-      [active.id, cancelledWithPaid.id, paused.id, atZero.id].sort(),
+      [active.id, cancelledWithPaid.id, paused.id, atZero.id, held.id].sort(),
     );
     const byAddress = (id: string) => m.sent.find((message) => message.to === `${id}@example.test`);
     expect(byAddress(active.id).text).toContain("Confirm or update your delivery address");
+    expect(byAddress(held.id).text).toContain("Confirm or update your delivery address");
+    expect(byAddress(held.id).text).not.toContain("Update your card");
     expect(byAddress(paused.id).text).toContain("Update your card");
     expect(byAddress(paused.id).text).not.toContain("Confirm or update your delivery address");
     // The address link names the subscription and the release, and nothing else.
@@ -342,6 +346,36 @@ describe("who is due each email", () => {
     expect(text(soon.id)).toContain("we'll charge $40.00 plus any tax");
     expect(text(soon.id)).toContain("renew Yearly subscription for another 2 issues");
     expect(text(late.id)).toContain("hasn't shipped yet");
+  });
+
+  it("under the hold rule, a dated notice doesn't promise a charge that two or more paid releases rule out", async () => {
+    const s = await setupShop();
+    const one = await subscribe(s, { termEndsAt: ahead(10), releasesRemaining: 1 });
+    await subscribe(s, { termEndsAt: ahead(10), releasesRemaining: 3 });
+    await queueEmails(env.DB, s.shop.id, NOW);
+    expect((await rows(s.shop.id, "upcomingCharge")).map((row) => row.subscriptionId)).toEqual([one.id]);
+  });
+
+  it("TERM_DATE charges on the date whatever is left, so its dated notice still goes", async () => {
+    const s = await setupShop();
+    const plan = await db().plan.create({
+      data: { shopId: s.shop.id, name: "T", displayName: "T", priceCents: 1000, renewalRule: "TERM_DATE" },
+    });
+    const carried = await subscribe(s, { planId: plan.id, termEndsAt: ahead(10), releasesRemaining: 3 });
+    await queueEmails(env.DB, s.shop.id, NOW);
+    expect((await rows(s.shop.id, "upcomingCharge")).map((row) => row.subscriptionId)).toEqual([carried.id]);
+  });
+
+  it("a renewal already on hold is told again with its last paid release's pre-order, when the charge is near", async () => {
+    const s = await setupShop();
+    await release(s, "PREORDER");
+    const last = await subscribe(s, { termEndsAt: ago(400), releasesRemaining: 1 });
+    await subscribe(s, { termEndsAt: ago(400), releasesRemaining: 2 }); // this release doesn't end it
+    await subscribe(s, { termEndsAt: ahead(100), releasesRemaining: 1 }); // the term isn't over: no charge with this order
+    await queueEmails(env.DB, s.shop.id, NOW);
+    const queued = await rows(s.shop.id, "upcomingCharge");
+    expect(queued.map((row) => row.subscriptionId)).toEqual([last.id]);
+    expect(queued[0].subject.startsWith("release:")).toBe(true);
   });
 
   it("upcoming charge for a bundle that renews when releases run out comes with the last release's pre-order", async () => {

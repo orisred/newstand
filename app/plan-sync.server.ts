@@ -9,6 +9,10 @@ export type Graphql = (
   variables?: Record<string, unknown>,
 ) => Promise<any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
+/** Shopify is limiting the Admin API. Nothing is wrong with the request. */
+class AdminThrottled extends Error {}
+export const isThrottled = (error: unknown) => error instanceof AdminThrottled;
+
 /** Wraps the app library's Admin API client. GraphQL errors (including throttling) throw, so the job retries. */
 export function graphqlOf(admin: {
   graphql: (
@@ -21,6 +25,9 @@ export function graphqlOf(admin: {
       data?: unknown;
       errors?: unknown;
     };
+    if (body.errors && /"THROTTLED"|"networkStatusCode":429/.test(JSON.stringify(body.errors))) {
+      throw new AdminThrottled("Admin API is limiting requests");
+    }
     if (body.errors || !body.data) throw new Error("Admin API returned errors");
     return body.data;
   };

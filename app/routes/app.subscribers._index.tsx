@@ -58,6 +58,8 @@ const VIEW_TEXT: Record<View, string> = {
   all: "All",
   live: "Active",
   paused: "Paused",
+  onHold: "On hold from import",
+  noCard: "Imported, no card",
   ending: "Cancelled, still shipping",
   finished: "Finished",
   gifts: "Gifts",
@@ -71,6 +73,21 @@ export default function Subscribers() {
 
   return (
     <s-page heading="Subscribers">
+      {counts.noCard > 0 && (
+        <s-banner tone="critical" heading={`${counts.noCard} imported with no card`}>
+          <s-paragraph>
+            Their contracts have no card, so their next charge will fail, retry and then pause. Ask
+            them to save a card: it&apos;s picked up just before the charge.
+          </s-paragraph>
+        </s-banner>
+      )}
+      {counts.onHold > 0 && (
+        <s-banner tone="warning" heading={`${counts.onHold} on hold from the import`}>
+          <s-paragraph>
+            Nothing is charged until you release each one on its page. Paid {plural} still ship.
+          </s-paragraph>
+        </s-banner>
+      )}
       <s-section heading="At a glance">
         <s-stack direction="inline" gap="large">
           <s-stack gap="small-300">

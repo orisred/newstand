@@ -14,7 +14,7 @@
     // Keep in step with application_url in shopify.app.toml.
     "SHOPIFY_APP_URL": "https://release-subscriptions.ne-dev.workers.dev",
     // Keep in step with access_scopes.scopes in shopify.app.toml.
-    "SCOPES": "write_products,read_customers,write_customers,read_customer_payment_methods,write_own_subscription_contracts,write_orders,write_merchant_managed_fulfillment_orders,write_validations,read_shopify_payments_disputes",
+    "SCOPES": "write_products,read_customers,write_customers,read_customer_payment_methods,write_own_subscription_contracts,write_orders,write_merchant_managed_fulfillment_orders,write_validations,read_shopify_payments_disputes,read_all_orders",
     "SHOP_CUSTOM_DOMAIN": "",
     // The one sending address for every shop. Its domain must be onboarded for Email Sending in
     // Cloudflare. Each shop sets only the From name (its name) and the Reply-To (its contact email).

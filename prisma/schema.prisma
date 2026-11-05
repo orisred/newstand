@@ -34,6 +34,8 @@ model Shop {
   events               Event[]
   emailSends           EmailSend[]
   memberTags           MemberTag[]
+  importRuns           ImportRun[]
+  importRows           ImportRow[]
 }
 
 enum ReleaseStatus {
@@ -174,6 +176,8 @@ model Subscription {
   pausedReason       String?            // FAILED_PAYMENT or CHARGEBACK
   paymentProblemSince DateTime?         // from the first failed try or chargeback until it's resolved. See "Reach-back" in DECISIONS.md
   signupCents        Int?               // the sign-up payment order's subtotal; null until read. See "Dashboard" in DECISIONS.md
+  importedBalance    Int?               // IMPORTED: paid releases it arrived with, paid outside the app's records
+  noCardSince        DateTime?          // IMPORTED: its contract has no card, so its next charge will fail. See "Migration import"
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
   deliveries         Delivery[]
@@ -316,6 +320,69 @@ model MemberTag {
   updatedAt   DateTime @updatedAt
 
   @@index([shopId])
+}
+
+enum ImportRunStatus {
+  COLLECTING // the browser is sending contacts
+  READING    // the dry run is reading order history
+  READ       // the report is ready
+  IMPORTING  // the real run is creating contracts
+  DONE
+}
+
+// One upload of a contacts export. `settings` is the plan mapping and past issues, never contact data.
+model ImportRun {
+  id         String          @id
+  shopId     String
+  shop       Shop            @relation(fields: [shopId], references: [id])
+  status     ImportRunStatus @default(COLLECTING)
+  settings   Json
+  readAt     DateTime?       // when the dry run finished: its term dates are as of then
+  importedAt DateTime?       // when the real run started
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+
+  @@index([shopId, createdAt])
+}
+
+enum ImportRowState {
+  TO_READ   // a contact whose orders haven't been read
+  READ      // in the report
+  QUEUED    // the real run will create it, after reading the customer again
+  CREATING  // leased while a contract is created; a lapsed lease is taken up again
+  DONE      // has its contract and Subscription
+  SKIPPED   // the real run's fresh read said not to import it
+  FAILED    // Shopify refused; `error` says why
+}
+
+// A line of the import report. Holds Shopify IDs, numbers, dates and a country code, and no names,
+// addresses or emails. `key` is customer:plan:first order, so a later run finds the same row.
+model ImportRow {
+  id               String         @id
+  shopId           String
+  shop             Shop           @relation(fields: [shopId], references: [id])
+  key              String         // also the marker on the contract in Shopify
+  runId            String         // the run that last read it
+  contactNumber    Int?           // which data line of the merchant's export
+  customerGid      String?
+  contactCancelled Boolean        @default(false)
+  planId           String?
+  state            ImportRowState @default(TO_READ)
+  category         String?        // see CATEGORY_TEXT in app/routes/app.import.tsx
+  flags            Json           @default("[]")
+  facts            Json           @default("{}")
+  leaseUntil       DateTime?
+  attempts         Int            @default(0)
+  contractGid      String?
+  subscriptionId   String?
+  error            String?        // Shopify's code and field, never a message that could quote the customer
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@unique([shopId, key])
+  @@index([runId, state])
+  @@index([runId, category])
+  @@index([shopId, customerGid])
 }
 
 enum JobRunStatus {

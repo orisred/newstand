@@ -4,6 +4,7 @@ import { emailRunJob } from "./notification-jobs";
 import { logEvent } from "./logger.server";
 import type { View } from "./dashboard-format";
 import type { Graphql } from "./plan-sync.server";
+import { IMPORT_HOLD } from "./subscriptions.server";
 
 type Db = ReturnType<typeof createDb>;
 
@@ -54,6 +55,8 @@ const VIEW_WHERE: Record<View, string> = {
   all: "1 = 1",
   live: LIVE,
   paused: `s."status" = 'PAUSED'`,
+  onHold: `s."pausedReason" = '${IMPORT_HOLD}'`,
+  noCard: `s."noCardSince" IS NOT NULL AND s."status" IN ('ACTIVE', 'PAUSED')`,
   ending: ENDING,
   finished: FINISHED,
   gifts: `s."source" = 'GIFT'`,
@@ -61,7 +64,16 @@ const VIEW_WHERE: Record<View, string> = {
 
 const CHURN_DAYS = 30;
 
-type Counts = { total: number; live: number; paused: number; ending: number; finished: number; gifts: number };
+type Counts = {
+  total: number;
+  live: number;
+  paused: number;
+  onHold: number;
+  noCard: number;
+  ending: number;
+  finished: number;
+  gifts: number;
+};
 type Churn = { cancelled: number; viaPortal: number };
 
 function countStatements(rawDb: D1Database, shopId: string, now: Date) {
@@ -71,6 +83,8 @@ function countStatements(rawDb: D1Database, shopId: string, now: Date) {
         `SELECT COUNT(*) AS "total",
            COALESCE(SUM(${LIVE}), 0) AS "live",
            COALESCE(SUM(s."status" = 'PAUSED'), 0) AS "paused",
+           COALESCE(SUM(${VIEW_WHERE.onHold}), 0) AS "onHold",
+           COALESCE(SUM(${VIEW_WHERE.noCard}), 0) AS "noCard",
            COALESCE(SUM(${ENDING}), 0) AS "ending",
            COALESCE(SUM(${FINISHED}), 0) AS "finished",
            COALESCE(SUM(s."source" = 'GIFT'), 0) AS "gifts"
@@ -217,10 +231,12 @@ export async function getSubscriber(db: Db, shopId: string, id: string) {
       termEndsAt: true,
       pausedReason: true,
       paymentProblemSince: true,
+      noCardSince: true,
+      lockedPriceCents: true,
       signupCents: true,
       createdAt: true,
       plan: {
-        select: { id: true, name: true, displayName: true, billingMode: true, autoRenew: true, currency: true },
+        select: { id: true, name: true, displayName: true, billingMode: true, autoRenew: true, renewalRule: true, currency: true },
       },
     },
   });
@@ -316,7 +332,7 @@ export async function listConfirmations(rawDb: D1Database, shopId: string, relea
  * its slots in the order they were paid for, and each slot is worth its payment divided by the slots that
  * payment bought. So a bundle's payment is recognized as its releases ship, and money for releases not yet
  * shipped is deferred. A gift's sign-up payment is the buyer's order and counts the same way.
- * Imported subscriptions have no payment in the app's records, so their releases are unpriced.
+ * What an imported subscription arrived with has no payment in the app's records, so those releases are unpriced.
  */
 const SLOT_PAYMENTS = `
   WITH pay AS (
@@ -324,6 +340,11 @@ const SLOT_PAYMENTS = `
       CASE WHEN p."billingMode" = 'PREPAID_BUNDLE' THEN p."releasesPerTerm" ELSE 1 END AS n
     FROM "Subscription" s JOIN "Plan" p ON p."id" = s."planId"
     WHERE s."shopId" = ?1 AND s."source" <> 'IMPORTED'
+    UNION ALL
+    -- What an imported subscriber arrived with was paid outside the app's records: unpriced slots that
+    -- come before anything they pay here, so a later renewal isn't credited to a release it didn't buy.
+    SELECT s."id", -1, s."id", s."createdAt", NULL, s."importedBalance"
+    FROM "Subscription" s WHERE s."shopId" = ?1 AND s."source" = 'IMPORTED' AND s."importedBalance" > 0
     UNION ALL
     SELECT b."subscriptionId", 1, b."id", b."createdAt", b."amountCents",
       CASE WHEN p."billingMode" = 'PREPAID_BUNDLE' THEN p."releasesPerTerm" ELSE 1 END
@@ -375,7 +396,7 @@ export async function revenueReport(db: Db, rawDb: D1Database, shopId: string) {
     rawDb
       .prepare(
         `${SLOT_PAYMENTS}
-         SELECT COALESCE(SUM(amt), 0) AS "total", SUM(amt IS NULL) AS "unread" FROM pay`,
+         SELECT COALESCE(SUM(amt), 0) AS "total", SUM(amt IS NULL) AS "unread" FROM pay WHERE ord >= 0`,
       )
       .bind(shopId),
   ]);
@@ -599,8 +620,7 @@ export function signupAmountCents(node: ContractNode): number | null {
  * Reads what payments brought in, and the plans' stock, from Shopify and keeps them. State-driven:
  * it finds the payments still unread, so a missed hour, a retry or a second job changes nothing.
  * A billing order's amount is its subtotal after discounts, before tax and shipping, as of the read (a later
- * refund isn't reflected). Orders can only be read for 60 days without `read_all_orders`, so a payment
- * unread after that stays unread.
+ * refund isn't reflected). `read_all_orders` lets it read a payment of any age.
  */
 export async function refreshDashboard(db: Db, rawDb: D1Database, graphql: Graphql, shopDomain: string, now = new Date()) {
   const shop = await db.shop.findUnique({ where: { shopDomain }, select: { id: true } });
