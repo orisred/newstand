@@ -785,6 +785,12 @@ describe("changing the address", () => {
       (await db().delivery.findUniqueOrThrow({ where: { id: delivery.id } }))
         .addressConfirmedAt,
     ).not.toBeNull();
+    // The merchant's dashboard shows who changed an address.
+    expect(
+      await db().event.count({
+        where: { subscriptionId: sub.id, type: "portal.address_changed" },
+      }),
+    ).toBe(1);
   });
 
   it("changes nothing for a country the shop doesn't ship to, or a cancelled subscription", async () => {
@@ -797,6 +803,11 @@ describe("changing the address", () => {
         countryCode: "CA",
       }),
     ).rejects.toThrow(PortalError);
+    expect(
+      await db().event.count({
+        where: { subscriptionId: sub.id, type: "portal.address_changed" },
+      }),
+    ).toBe(0);
     const cancelled = await subscribe(s, { status: "CANCELLED" });
     await expect(
       changeAddress(db(), env.DB, fake.graphql, await own(s, cancelled), good),
@@ -978,6 +989,12 @@ describe("cancelling", () => {
       (await db().subscription.findUniqueOrThrow({ where: { id: sub.id } }))
         .status,
     ).toBe("CANCELLED");
+    // The merchant's dashboard counts it as a cancellation made in the portal.
+    expect(
+      await db().event.count({
+        where: { subscriptionId: sub.id, type: "portal.cancelled" },
+      }),
+    ).toBe(1);
     // Two paid releases are still owed, so the waiting Delivery stays.
     expect(
       (await db().delivery.findUniqueOrThrow({ where: { id: delivery.id } }))
@@ -1112,6 +1129,11 @@ describe("cancelling", () => {
       NOW,
     );
     expect(fake.calls).toHaveLength(1);
+    expect(
+      await db().event.count({
+        where: { subscriptionId: sub.id, type: "portal.cancelled" },
+      }),
+    ).toBe(1);
     expect(
       await db().event.count({
         where: { subscriptionId: sub.id, type: "subscription.cancelled" },

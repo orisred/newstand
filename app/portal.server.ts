@@ -3,6 +3,7 @@ import { recordAddressConfirmation } from "./emails.server";
 import { logEvent } from "./logger.server";
 import type { Graphql } from "./plan-sync.server";
 import { DUE_SUBSCRIPTION } from "./release-runs.server";
+import { PORTAL_ADDRESS_EVENT, PORTAL_CANCELLED_EVENT, portalEvent } from "./dashboard.server";
 import { markCancelled } from "./subscriptions.server";
 
 type Db = ReturnType<typeof createDb>;
@@ -523,6 +524,7 @@ export async function changeAddress(
     if (release.confirmable)
       await recordAddressConfirmation(rawDb, subscription.id, release.id, now);
   }
+  await portalEvent(rawDb, subscription.id, PORTAL_ADDRESS_EVENT, now);
   logEvent("info", "portal.address_changed", {
     subscriptionId: subscription.id,
   });
@@ -602,5 +604,6 @@ export async function cancelSubscription(
     throw new PortalError("shopify", "We couldn't cancel your subscription.");
   }
   await markCancelled(rawDb, subscription.id, now);
+  await portalEvent(rawDb, subscription.id, PORTAL_CANCELLED_EVENT, now);
   logEvent("info", "portal.cancelled", { subscriptionId: subscription.id });
 }

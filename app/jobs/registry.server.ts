@@ -18,6 +18,7 @@ import {
   settleAttempt,
 } from "../billing.server";
 import { ensureCartRule } from "../cart-rule.server";
+import { DASHBOARD_JOB, dashboardJob, refreshDashboard } from "../dashboard.server";
 import { publishGiftPlans } from "../gifts.server";
 import { runEmailSlice } from "../emails.server";
 import { runFlowSlice } from "../flow.server";
@@ -202,6 +203,11 @@ export const jobHandlers: Record<string, JobHandler> = {
     if (next) await enqueueJobs(env, [next]);
   },
 
+  // Reads what payments brought in and the plans' stock from Shopify, for the dashboard. Read-only.
+  [DASHBOARD_JOB]: async (job, { db, env }) => {
+    await refreshDashboard(db, env.DB, await shopGraphql(job.shop), job.shop!);
+  },
+
   [GDPR_JOB]: async (job, { db, env }) => {
     const { topic, shopDomain, customerGid, requestId } = job.data ?? {};
     if (typeof shopDomain !== "string") throw new Error("gdpr job without a shop");
@@ -231,7 +237,7 @@ const findMissedContractWork: DueWorkFinder = async ({ env, now }) => {
   }));
 };
 
-/** Each hour, for every installed shop: its emails, its Flow triggers and its customers' tags. */
+/** Each hour, for every installed shop: its emails, its Flow triggers, its customers' tags and its dashboard figures. */
 const findNotificationWork: DueWorkFinder = async ({ env, now }) => {
   const { results } = await env.DB.prepare(
     `SELECT s."shopDomain" FROM "Shop" s
@@ -242,6 +248,7 @@ const findNotificationWork: DueWorkFinder = async ({ env, now }) => {
     emailRunJob(shopDomain, hour),
     flowJob(shopDomain, hour),
     memberTagJob(shopDomain, hour),
+    dashboardJob(shopDomain, hour),
   ]);
 };
 
