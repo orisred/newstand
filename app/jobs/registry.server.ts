@@ -56,7 +56,7 @@ import {
   renewAfterOrder,
   runReleaseSlice,
 } from "../release-runs.server";
-import { fireScheduledRelease } from "../releases.server";
+import { fireScheduledRelease, publishReleaseProducts } from "../releases.server";
 import { getOrCreateShop } from "../shop.server";
 import { unauthenticated } from "../shopify.server";
 import {
@@ -89,6 +89,7 @@ export const jobHandlers: Record<string, JobHandler> = {
     await syncPlan(db, graphql, shopId, planId);
     await ensureCartRule(graphql);
     await publishGiftPlans(db, graphql, shopId);
+    await publishReleaseProducts(db, graphql, shopId);
   },
 
   // One contract's subscription and first release. Queued by its webhooks and the tick.

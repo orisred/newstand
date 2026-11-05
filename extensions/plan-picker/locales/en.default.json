@@ -6,5 +6,10 @@
     "gift_name": "Recipient's name",
     "gift_message": "Message (optional)",
     "gift_note": "Enter the recipient's address as the shipping address at checkout. They will never be charged, and the gift doesn't renew."
+  },
+  "subscribe": {
+    "added": "Added to your cart.",
+    "view_cart": "View cart",
+    "error": "Sorry, that couldn't be added. Please try again."
   }
 }
