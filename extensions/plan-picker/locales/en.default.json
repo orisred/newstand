@@ -1,5 +1,10 @@
 {
   "plan_picker": {
-    "legend": "Subscription plan"
+    "legend": "Subscription plan",
+    "gift": "This is a gift",
+    "gift_email": "Recipient's email",
+    "gift_name": "Recipient's name",
+    "gift_message": "Message (optional)",
+    "gift_note": "Enter the recipient's address as the shipping address at checkout. They will never be charged, and the gift doesn't renew."
   }
 }

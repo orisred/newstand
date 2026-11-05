@@ -56,10 +56,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
 
 const EMAIL_LABELS: Record<EmailKey, string> = {
   welcome: "Welcome",
+  giftReceived: "Gift received (to the recipient)",
   preorderAnnounced: "Pre-order announced",
   upcomingCharge: "Upcoming charge",
   failedPayment: "Failed payment",
-  lastReleaseShipping: "Last paid release shipping",
+  lastReleaseShipping: "Last paid release shipping (a gift's end-of-gift offer too)",
 };
 
 export default function Settings() {

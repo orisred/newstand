@@ -111,6 +111,16 @@ const QUEUES: string[] = [
     enabled("welcome"),
   ),
 
+  // Gift received: tells the recipient, whose subscription it is, and carries the buyer's message.
+  insertEmails(
+    "giftReceived",
+    `'start'`,
+    `${SUBSCRIBER}
+     WHERE ${BASE} AND s."source" = 'GIFT' AND s."status" = 'ACTIVE'
+       AND ${within(`s."createdAt"`, WELCOME_WITHIN_DAYS)}`,
+    enabled("giftReceived"),
+  ),
+
   // Pre-order announced: everyone who will receive the release, which is who a run would assign
   // (DUE_SUBSCRIPTION) and anyone who already has a Delivery on it. A chargeback gets nothing.
   insertEmails(
@@ -171,7 +181,7 @@ const QUEUES: string[] = [
     `FROM "Event" e
      JOIN "Subscription" s ON s."id" = e."subscriptionId"
      JOIN "Shop" sh ON sh."id" = s."shopId"
-     WHERE e."type" = 'billing.failed' AND ${BASE} AND ${within(`e."createdAt"`, FAILED_WITHIN_DAYS)}`,
+     WHERE e."type" = 'billing.failed' AND s."source" <> 'GIFT' AND ${BASE} AND ${within(`e."createdAt"`, FAILED_WITHIN_DAYS)}`,
     enabled("failedPayment"),
   ),
 
@@ -243,6 +253,7 @@ type Row = {
   pausedReason: string | null;
   paymentProblemSince: string | null;
   quantity: number;
+  giftMessage: string | null;
   lockedPriceCents: number | null;
   termEndsAt: string | null;
   createdAt: string;
@@ -293,6 +304,9 @@ export function staleReason(
   switch (row.kind) {
     case "welcome":
       return row.status === "ACTIVE" ? null : "not_active";
+    case "giftReceived":
+      if (row.source !== "GIFT") return "not_gift";
+      return row.status === "ACTIVE" ? null : "not_active";
     case "preorderAnnounced":
       if (extra.release?.status !== "PREORDER") return "release_moved_on";
       if (chargeback) return "chargeback";
@@ -313,6 +327,8 @@ export function staleReason(
       return null;
     }
     case "failedPayment":
+      // Nothing is ever charged for a gift, so a failure can't be its own.
+      if (row.source === "GIFT") return "gift";
       if (row.status !== "ACTIVE" && row.status !== "PAUSED") return "not_active";
       return row.paymentProblemSince ? null : "resolved";
     case "lastReleaseShipping":
@@ -322,6 +338,7 @@ export function staleReason(
         ? "renewed"
         : null;
     case "priceChange":
+      if (row.source === "GIFT") return "gift";
       if (row.status !== "ACTIVE" && row.status !== "PAUSED") return "not_active";
       if (!extra.change || extra.latestChange?.id !== extra.change.id) return "superseded";
       return extra.change.effectiveAt <= extra.now ? "too_late" : null;
@@ -371,6 +388,13 @@ async function dataFor(row: Row, ctx: SendContext): Promise<EmailData> {
   switch (row.kind) {
     case "welcome":
       return { kind: "welcome", plan: row.displayName };
+    case "giftReceived":
+      return {
+        kind: "giftReceived",
+        plan: row.displayName,
+        message: row.giftMessage,
+        portalUrl: ctx.portalUrl,
+      };
     case "preorderAnnounced":
       return {
         kind: "preorderAnnounced",
@@ -419,6 +443,8 @@ async function dataFor(row: Row, ctx: SendContext): Promise<EmailData> {
         kind: "lastReleaseShipping",
         plan: row.displayName,
         release: ctx.deliveries.get(row.subject) ?? "your last release",
+        gift: row.source === "GIFT",
+        portalUrl: ctx.portalUrl,
       };
     case "priceChange": {
       const change = ctx.changes.get(row.subject)!;
@@ -478,7 +504,7 @@ function copyOf(shop: Shop, data: ShopifyShop): ShopCopy {
 
 const PAGE = `SELECT e."id", e."kind", e."subject", e."attempts", e."subscriptionId", s."contractGid",
     s."status", s."customerGid", s."source", s."releasesRemaining", s."pausedReason",
-    s."paymentProblemSince", s."quantity", s."lockedPriceCents", s."termEndsAt", s."createdAt",
+    s."paymentProblemSince", s."quantity", s."giftMessage", s."lockedPriceCents", s."termEndsAt", s."createdAt",
     p."id" AS "planId", p."displayName", p."priceCents", p."currency", p."autoRenew", p."releasesPerTerm"
   FROM "EmailSend" e
   JOIN "Subscription" s ON s."id" = e."subscriptionId"

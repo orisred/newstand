@@ -11,6 +11,7 @@ import {
   ownSubscription,
   PortalError,
   portalCopy,
+  refuseGift,
   sendCardUpdateEmail,
 } from "../portal.server";
 import { authenticate, unauthenticated } from "../shopify.server";
@@ -107,6 +108,11 @@ export const action = ({ request, context }: ActionFunctionArgs) =>
       plural: subscription.shop.releaseWordPlural,
     });
     try {
+      // A gift's card and contract are the buyer's: refused before Shopify is asked anything.
+      if (body?.intent === "card" || body?.intent === "resume") {
+        refuseGift(subscription, "giftNoCard");
+      }
+      if (body?.intent === "cancel") refuseGift(subscription, "giftNoCancel");
       switch (body?.intent) {
         case "confirm": {
           const done = await confirmAddress(

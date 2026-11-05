@@ -1199,6 +1199,8 @@ export async function resumeAfterCardUpdate(
   const failing = await db.subscription.findMany({
     where: {
       customerGid,
+      // A gift is never charged, so a card the recipient saves has nothing to recover.
+      source: { not: "GIFT" },
       shop: { shopDomain: shop },
       status: { in: ["ACTIVE", "PAUSED"] },
       paymentProblemSince: { not: null },

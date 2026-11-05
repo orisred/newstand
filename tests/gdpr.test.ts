@@ -362,3 +362,81 @@ describe("the contract route", () => {
     expect(jobs).toHaveLength(0);
   });
 });
+
+describe("gifts and personal data", () => {
+  const BUYER = "gid://shopify/Customer/9001";
+  const RECIPIENT = "gid://shopify/Customer/9002";
+
+  async function gift() {
+    const ctx = await setup();
+    const sub = await db().subscription.create({
+      data: {
+        shopId: ctx.shop.id,
+        planId: ctx.plan.id,
+        contractGid: `gid://shopify/SubscriptionContract/${++n}`,
+        customerGid: RECIPIENT,
+        source: "GIFT",
+        giftBuyerGid: BUYER,
+        giftMessage: "Happy birthday",
+        releasesRemaining: 2,
+        deliveries: { create: { releaseId: ctx.release.id, addressConfirmedAt: new Date() } },
+      },
+    });
+    await db().emailSend.create({
+      data: { id: `giftReceived:${sub.id}:start`, shopId: ctx.shop.id, subscriptionId: sub.id, kind: "giftReceived", subject: "start" },
+    });
+    return { ...ctx, gift: sub };
+  }
+
+  it("a data request from the buyer and from the recipient each get the gift and its message", async () => {
+    const { domain, shop, gift: sub, other } = await gift();
+    await recordDataRequest(db(), env.DB, domain, BUYER, "buyer-req");
+    await recordDataRequest(db(), env.DB, domain, RECIPIENT, "recipient-req");
+    for (const requestId of ["buyer-req", "recipient-req"]) {
+      const event = await db().event.findFirstOrThrow({
+        where: { shopId: shop.id, type: DATA_REQUEST_EVENT, id: { endsWith: requestId } },
+      });
+      const payload = event.payload as any;
+      expect(payload.subscriptions.map((row: any) => row.id), requestId).toEqual([sub.id]);
+      expect(payload.subscriptions[0]).toMatchObject({ source: "GIFT", giftMessage: "Happy birthday" });
+      expect(payload.subscriptions[0].emailSends).toEqual([expect.objectContaining({ kind: "giftReceived" })]);
+      expect(JSON.stringify(payload)).not.toContain(other.id);
+    }
+  });
+
+  it("erasing the buyer clears them and the message, and the recipient keeps their gift", async () => {
+    const { domain, gift: sub } = await gift();
+    await redactCustomer(db(), env.DB, domain, BUYER);
+    expect(await db().subscription.findUniqueOrThrow({ where: { id: sub.id } })).toMatchObject({
+      giftBuyerGid: null,
+      giftMessage: null,
+      customerGid: RECIPIENT,
+      status: "ACTIVE",
+    });
+    expect(await db().emailSend.count({ where: { subscriptionId: sub.id } })).toBe(1);
+  });
+
+  it("erasing the recipient ends the gift, erases the message and their records, and the buyer's other subscriptions stay", async () => {
+    const { domain, shop, plan, gift: sub } = await gift();
+    const buyers = await db().subscription.create({
+      data: {
+        shopId: shop.id,
+        planId: plan.id,
+        contractGid: `gid://shopify/SubscriptionContract/${++n}`,
+        customerGid: BUYER,
+        releasesRemaining: 2,
+      },
+    });
+    await redactCustomer(db(), env.DB, domain, RECIPIENT);
+    expect(await db().subscription.findUniqueOrThrow({ where: { id: sub.id } })).toMatchObject({
+      customerGid: "redacted",
+      giftMessage: null,
+      status: "ENDED",
+    });
+    expect(await db().emailSend.count({ where: { subscriptionId: sub.id } })).toBe(0);
+    expect(await db().subscription.findUniqueOrThrow({ where: { id: buyers.id } })).toMatchObject({
+      customerGid: BUYER,
+      status: "ACTIVE",
+    });
+  });
+});

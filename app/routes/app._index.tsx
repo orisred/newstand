@@ -38,6 +38,7 @@ import {
 } from "../releases.server";
 import { getOrCreateShop } from "../shop.server";
 import { authenticate } from "../shopify.server";
+import { GIFT_INVALID_EVENT } from "../gifts.server";
 import { MIXED_HANDLED_EVENT, MIXED_PLANS_EVENT } from "../subscriptions.server";
 
 const TIMEZONE = `#graphql
@@ -81,10 +82,13 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     listRunProgress(db, shop.orderTiming, rows),
     listPaymentProblems(db, shop.id),
     db.event.findMany({
-      where: { shopId: shop.id, type: MIXED_PLANS_EVENT },
+      where: {
+        shopId: shop.id,
+        type: { in: [MIXED_PLANS_EVENT, GIFT_INVALID_EVENT] },
+      },
       orderBy: { createdAt: "desc" },
       take: 10,
-      select: { id: true, payload: true },
+      select: { id: true, type: true, payload: true },
     }),
   ]);
   return {
@@ -109,13 +113,18 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       };
     }),
     morePaymentProblems: problems.more,
-    mixed: mixed.map(({ id, payload }) => {
+    mixed: mixed.map(({ id, type, payload }) => {
       const { orderGid, orderName } = payload as {
         orderGid?: string;
         orderName?: string;
       };
       const orderId = String(orderGid).split("/").pop();
-      return { id, orderId, orderName: orderName ?? `Order ${orderId}` };
+      return {
+        id,
+        gift: type === GIFT_INVALID_EVENT,
+        orderId,
+        orderName: orderName ?? `Order ${orderId}`,
+      };
     }),
     // One-time token for the create form: a double submit carries the same one.
     createKey: crypto.randomUUID(),
@@ -175,7 +184,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       where: {
         id: String(form.get("eventId")),
         shopId: shop.id,
-        type: MIXED_PLANS_EVENT,
+        type: { in: [MIXED_PLANS_EVENT, GIFT_INVALID_EVENT] },
       },
       data: { type: MIXED_HANDLED_EVENT },
     });
@@ -411,39 +420,52 @@ export default function Releases() {
 
   return (
     <s-page heading={heading}>
-      {mixed.length > 0 && (
-        <s-banner
-          tone="critical"
-          heading="A sign-up needs you: one contract holds more than one plan"
-        >
-          <s-stack gap="base">
-            <s-paragraph>
-              Shopify put two plans on one subscription contract, and a contract
-              is charged as a whole, so the app can&apos;t charge them separately.
-              No subscription was created and the order stays unfulfilled. Refund
-              it and ask the customer to buy each plan separately.
-            </s-paragraph>
-            {mixed.map(({ id, orderId, orderName }) => (
-              <s-stack key={id} direction="inline" gap="base" alignItems="center">
-                <s-link href={`shopify://admin/orders/${orderId}`}>
-                  {orderName}
-                </s-link>
-                <s-button
-                  {...(busy ? { disabled: true } : {})}
-                  onClick={() =>
-                    fetcher.submit(
-                      { intent: "mixedHandled", eventId: id },
-                      { method: "POST" },
-                    )
-                  }
-                >
-                  Mark as handled
-                </s-button>
+      {[
+        {
+          gift: false,
+          heading: "A sign-up needs you: one contract holds more than one plan",
+          text: "Shopify put two plans on one subscription contract, and a contract is charged as a whole, so the app can't charge them separately. No subscription was created and the order stays unfulfilled. Refund it and ask the customer to buy each plan separately.",
+        },
+        {
+          gift: true,
+          heading: "A gift needs you: its recipient couldn't be used",
+          text: "The buyer paid for a gift, but the recipient's email was missing, invalid, refused by Shopify, or the gift sat in a cart with other subscriptions. No subscription was created, so nothing will ship or be charged, and the order stays unfulfilled. Contact the buyer, then refund the order or cancel its subscription contract in Shopify.",
+        },
+      ].map(({ gift, heading: title, text }) => {
+        const rows = mixed.filter((row) => row.gift === gift);
+        return (
+          rows.length > 0 && (
+            <s-banner key={title} tone="critical" heading={title}>
+              <s-stack gap="base">
+                <s-paragraph>{text}</s-paragraph>
+                {rows.map(({ id, orderId, orderName }) => (
+                  <s-stack
+                    key={id}
+                    direction="inline"
+                    gap="base"
+                    alignItems="center"
+                  >
+                    <s-link href={`shopify://admin/orders/${orderId}`}>
+                      {orderName}
+                    </s-link>
+                    <s-button
+                      {...(busy ? { disabled: true } : {})}
+                      onClick={() =>
+                        fetcher.submit(
+                          { intent: "mixedHandled", eventId: id },
+                          { method: "POST" },
+                        )
+                      }
+                    >
+                      Mark as handled
+                    </s-button>
+                  </s-stack>
+                ))}
               </s-stack>
-            ))}
-          </s-stack>
-        </s-banner>
-      )}
+            </s-banner>
+          )
+        );
+      })}
       {paymentProblems.length > 0 && (
         <s-section heading="Payment problems">
           <s-stack gap="base">

@@ -5,3 +5,7 @@
 .plan-picker__option:has(input:disabled) { opacity: 0.6; cursor: not-allowed; }
 .plan-picker__name { flex: 1; }
 .plan-picker__terms { margin: 0.5rem 0 0; font-size: 0.9em; opacity: 0.8; }
+.plan-picker__gift-fields { display: grid; gap: 0.5rem; padding: 0 0 0.5rem 1.6rem; }
+.plan-picker__field { display: grid; gap: 0.2rem; }
+.plan-picker__field input, .plan-picker__field textarea { width: 100%; }
+.plan-picker__gift[hidden], .plan-picker__gift-fields[hidden] { display: none; }

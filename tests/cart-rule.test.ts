@@ -9,6 +9,41 @@ const line = (plan: string | null) => ({
 const errorsFor = (...plans: (string | null)[]) =>
   run({ cart: { lines: plans.map(line) } }).operations[0].validationAdd.errors;
 
+/** A line carrying a gift's recipient, the way the plan picker sends it. */
+const gift = (plan: string | null, email: string | null, extra: Record<string, string> = {}) => ({
+  ...line(plan),
+  giftEmail: email === null ? null : { value: email },
+  giftName: extra.name ? { value: extra.name } : null,
+  giftMessage: extra.message ? { value: extra.message } : null,
+});
+const giftErrors = (...lines: ReturnType<typeof gift>[]) =>
+  run({ cart: { lines } }).operations[0].validationAdd.errors.map((e: { message: string }) => e.message);
+
+describe("the cart rule for gifts", () => {
+  it("allows a gift on its own, alongside other products, and an ordinary subscription", () => {
+    expect(giftErrors(gift("a", "ada@example.com", { name: "Ada", message: "Hi" }))).toEqual([]);
+    expect(giftErrors(gift("a", "ada@example.com"), gift(null, null))).toEqual([]);
+    expect(giftErrors(gift("a", null), gift("a", null))).toEqual([]);
+  });
+
+  it("blocks a gift next to another subscription line: they'd share one contract and one recipient", () => {
+    const together = /checked out on its own/;
+    expect(giftErrors(gift("a", "ada@example.com"), gift("a", "grace@example.com"))[0]).toMatch(together);
+    expect(giftErrors(gift("a", "ada@example.com"), gift("a", null))[0]).toMatch(together);
+  });
+
+  it("blocks a recipient with no usable email while the buyer can still fix it", () => {
+    for (const email of ["", "   ", "ada", "a@b", "a@b.com, c@d.com", "Ada <a@b.com>"]) {
+      expect(giftErrors(gift("a", email, { name: "Ada" })), email).toEqual([
+        "Please enter a valid email address for the gift recipient.",
+      ]);
+    }
+    expect(giftErrors(gift("a", null, { message: "Hi" }))).toHaveLength(1);
+    // A gift property on a line that isn't a subscription means nothing.
+    expect(giftErrors(gift(null, "nope"))).toEqual([]);
+  });
+});
+
 describe("the cart rule", () => {
   it("stops two different plans", () => {
     expect(errorsFor("a", "b")).toEqual([

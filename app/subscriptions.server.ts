@@ -5,6 +5,13 @@ import type {
   StartRule,
 } from "./generated/prisma/enums";
 import type { Job } from "./jobs/runner.server";
+import {
+  findOrCreateRecipient,
+  type GiftDetails,
+  GIFT_INVALID_EVENT,
+  isGiftPlan,
+  parseGiftLines,
+} from "./gifts.server";
 import { logEvent } from "./logger.server";
 import {
   CANCELLED_EVENT,
@@ -165,7 +172,7 @@ const CONTRACT = `#graphql
       createdAt
       customer { id }
       originOrder { id name }
-      lines(first: 50) { nodes { quantity sellingPlanId currentPrice { amount } } }
+      lines(first: 50) { nodes { quantity sellingPlanId currentPrice { amount } customAttributes { key value } } }
     }
   }`;
 
@@ -271,6 +278,7 @@ export async function syncContract(
     quantity: number;
     sellingPlanId: string | null;
     currentPrice: { amount: string };
+    customAttributes?: { key: string; value: string | null }[];
   }[];
   const planIds = [
     ...new Set(lines.flatMap((line) => line.sellingPlanId ?? [])),
@@ -286,6 +294,7 @@ export async function syncContract(
           releasesPerTerm: true,
           termMonths: true,
           startRule: true,
+          giftable: true,
         },
       })
     : [];
@@ -327,6 +336,47 @@ export async function syncContract(
   });
 
   if (!subscription) {
+    const planLines = lines.filter(
+      (line) => line.sellingPlanId === plan.sellingPlanGid,
+    );
+    // A gift belongs to its recipient, not to the contract's customer, who is the buyer.
+    let customerGid: string = contract.customer.id;
+    let gift: GiftDetails | null = null;
+    const parsed = isGiftPlan(plan)
+      ? parseGiftLines(planLines)
+      : ({ kind: "none" } as const);
+    if (parsed.kind === "gift") {
+      gift = parsed.gift;
+      const recipient = await findOrCreateRecipient(graphql, gift);
+      if (recipient) customerGid = recipient;
+      else gift = null;
+    }
+    if (parsed.kind === "invalid" || (parsed.kind === "gift" && !gift)) {
+      // The buyer has paid for a gift we can't deliver. Making a subscription for the buyer would
+      // send it to the wrong person, so nothing is created, the order stays unfulfilled and the
+      // merchant is told. No detail of the recipient goes in the flag or the log.
+      const reason = parsed.kind === "invalid" ? parsed.reason : "recipient_refused";
+      await rawDb
+        .prepare(
+          `INSERT INTO "Event" ("id", "shopId", "type", "payload")
+           VALUES (?1, ?2, ?3, ?4) ON CONFLICT ("id") DO NOTHING`,
+        )
+        .bind(
+          `${GIFT_INVALID_EVENT}:${contractGid}`,
+          shop.id,
+          GIFT_INVALID_EVENT,
+          JSON.stringify({
+            contractGid,
+            orderGid: contract.originOrder?.id ?? null,
+            orderName: contract.originOrder?.name ?? null,
+            reason,
+          }),
+        )
+        .run();
+      logEvent("error", "contract.gift_invalid", { contractGid, reason });
+      return [];
+    }
+
     const signedUpAt = new Date(contract.createdAt);
     const releases = await db.release.findMany({
       where: { shopId: shop.id },
@@ -343,9 +393,6 @@ export async function syncContract(
       releases,
       signedUpAt,
     );
-    const planLines = lines.filter(
-      (line) => line.sellingPlanId === plan.sellingPlanGid,
-    );
     const stamp = now.toISOString();
     const id = crypto.randomUUID();
     await rawDb.batch([
@@ -353,8 +400,8 @@ export async function syncContract(
         .prepare(
           `INSERT INTO "Subscription" ("id", "shopId", "planId", "contractGid", "customerGid", "status",
              "source", "quantity", "releasesRemaining", "firstReleaseNumber", "termEndsAt",
-             "lockedPriceCents", "createdAt", "updatedAt")
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'NEW', ?7, ?8, ?9, ?10, ?11, ?12, ?12)
+             "lockedPriceCents", "createdAt", "updatedAt", "giftBuyerGid", "giftMessage")
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?13, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?14, ?15)
            ON CONFLICT ("contractGid") DO NOTHING`,
         )
         .bind(
@@ -362,7 +409,7 @@ export async function syncContract(
           shop.id,
           plan.id,
           contractGid,
-          contract.customer.id,
+          customerGid,
           statusFor(contract.status, null),
           planLines.reduce((total, line) => total + line.quantity, 0),
           plan.billingMode === "PER_RELEASE" ? 1 : plan.releasesPerTerm,
@@ -372,6 +419,9 @@ export async function syncContract(
             : null,
           Math.round(Number(planLines[0].currentPrice.amount) * 100),
           stamp,
+          gift ? "GIFT" : "NEW",
+          gift ? contract.customer.id : null,
+          gift?.message ?? null,
         ),
       // For Flow. The ID is the contract's, so a lost race or a repeat adds nothing.
       rawDb

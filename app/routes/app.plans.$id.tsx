@@ -303,9 +303,10 @@ export default function PlanForm() {
                 <s-option value="NEXT">Always the next {word}</s-option>
               </s-select>
               <s-checkbox
-                label="Can be bought as a gift"
+                label="Can be bought as a gift (prepaid bundles only)"
                 name="giftable"
                 {...(plan?.giftable ? { checked: true } : {})}
+                error={errors.giftable}
               />
             </s-stack>
           </s-section>

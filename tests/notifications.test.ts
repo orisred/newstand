@@ -384,3 +384,37 @@ describe("GDPR for emails and tags", () => {
     expect(subscriptions[0].emailSends).toEqual([{ kind: "welcome", status: "SENT", sentAt: null }]);
   });
 });
+
+describe("a gift's Flow triggers and member tag go to the recipient", () => {
+  it("tags the recipient while paid releases remain, never the buyer, and takes it off with the last order", async () => {
+    const s = await setupShop();
+    const buyer = "gid://shopify/Customer/9001";
+    const sub = await subscribe(s, { source: "GIFT", giftBuyerGid: buyer, releasesRemaining: 1 });
+    const shopify = tagShopify();
+    await tags(s, shopify.graphql);
+    expect(shopify.calls).toEqual([{ op: "tagsAdd", id: sub.customerGid, tag: "active-subscriber" }]);
+    // The gift stays ACTIVE (it never renews), but its last paid release has an order now.
+    await db().subscription.update({ where: { id: sub.id }, data: { releasesRemaining: 0 } });
+    await tags(s, shopify.graphql);
+    expect(shopify.calls.at(-1)).toEqual({ op: "tagsRemove", id: sub.customerGid, tag: "active-subscriber" });
+    expect(shopify.calls.every((call) => call.id !== buyer)).toBe(true);
+  });
+
+  it("starts and finishes for the recipient's customer ID, once", async () => {
+    const s = await setupShop();
+    const sub = await subscribe(s, { source: "GIFT", giftBuyerGid: "gid://shopify/Customer/9001", releasesRemaining: 0 });
+    await event(s, sub.id, STARTED_EVENT);
+    const rel = await db().release.create({ data: { shopId: s.shop.id, number: ++n, title: "R", status: "READY" } });
+    await db().delivery.create({
+      data: { subscriptionId: sub.id, releaseId: rel.id, status: "ORDERED", orderGid: `gid://shopify/Order/${++n}`, updatedAt: ago(0.1) },
+    });
+    const flow = flowShopify();
+    await runFlow(s, flow.graphql);
+    await runFlow(s, flow.graphql);
+    const customer = Number(sub.customerGid.split("/").pop());
+    expect(flow.received.map((call) => [call.handle, call.payload.customer_id]).sort()).toEqual([
+      ["last-release-shipped", customer],
+      ["subscription-started", customer],
+    ]);
+  });
+});

@@ -6,6 +6,15 @@ query CartValidationsGenerateRunInput {
           id
         }
       }
+      giftEmail: attribute(key: "Gift recipient email") {
+        value
+      }
+      giftName: attribute(key: "Gift recipient name") {
+        value
+      }
+      giftMessage: attribute(key: "Gift message") {
+        value
+      }
     }
   }
 }

@@ -30,6 +30,11 @@ export function portalCopy({ singular: word, plural: words }: Words) {
     /** True whether or not a try follows: the job decides, and may decline (see `retryCharge`). */
     resumeAsked: `We've passed this on. If a payment is waiting and can be tried again now, we'll try it shortly. Refresh this page in a minute to see where it stands.`,
     cardSent: `We've emailed you a secure link to update your card.`,
+    /** A gift is the recipient's to receive, not to pay for: the card on the contract is the buyer's. */
+    giftNote: `This subscription is a gift. It's already paid for, so it won't renew and you'll never be charged.`,
+    giftNoCard: `This subscription is a gift, so there's no card or payment to manage.`,
+    giftNoCancel: `This subscription is a gift, so there's nothing for you to cancel: it ends by itself after the ${words} that were paid for. If you don't want it, please contact the shop.`,
+    giftMessageLabel: `A message with your gift (written by the sender)`,
     /** What cancelling does, before the customer decides. */
     cancel(paidLeft: number, onHold: boolean, held: number) {
       const count = `${paidLeft} ${paidLeft === 1 ? word : words}`;
@@ -94,6 +99,8 @@ export function ownSubscription(
       shopId: true,
       contractGid: true,
       status: true,
+      source: true,
+      giftMessage: true,
       pausedReason: true,
       paymentProblemSince: true,
       releasesRemaining: true,
@@ -351,6 +358,8 @@ export async function loadPortal(
       noUpcoming: copy.noUpcoming,
       addressNote: copy.addressNote,
       cardNote: copy.cardNote,
+      giftNote: copy.giftNote,
+      giftMessageLabel: copy.giftMessageLabel,
     },
     subscriptions: await Promise.all(
       owned.map(async (s) => {
@@ -359,20 +368,26 @@ export async function loadPortal(
           where: { subscriptionId: s.id, status: "HELD" },
         });
         const onHold = s.pausedReason === CHARGEBACK;
-        const card = node?.customerPaymentMethod?.instrument;
+        const gift = s.source === "GIFT";
+        // The contract's card is the buyer's, so a gift never shows it and never offers a card action.
+        const card = gift ? undefined : node?.customerPaymentMethod?.instrument;
         return {
           id: s.id,
           plan: s.plan.displayName,
           status: s.status,
+          gift,
+          giftMessage: gift ? s.giftMessage : null,
           onHold,
-          cardProblem: s.paymentProblemSince !== null && !onHold,
+          cardProblem: !gift && s.paymentProblemSince !== null && !onHold,
           paidLeft: s.releasesRemaining,
           address: node?.deliveryMethod?.address ?? null,
           card: card?.lastDigits
             ? `${card.brand ?? "Card"} ending ${card.lastDigits}`
             : null,
           upcoming: await upcomingFor(db, rawDb, s),
-          cancelNote: copy.cancel(s.releasesRemaining, onHold, held),
+          cancelNote: gift
+            ? copy.giftNoCancel
+            : copy.cancel(s.releasesRemaining, onHold, held),
         };
       }),
     ),
@@ -390,6 +405,24 @@ export class PortalError extends Error {
   }
 }
 
+/**
+ * A gift's contract and card are the buyer's. Its recipient can't manage either: the card email
+ * would go to the buyer, a retry would try the buyer's card, and cancelling would end a contract the
+ * recipient doesn't own, with nothing refunded and every paid release still shipping.
+ */
+export function refuseGift(
+  subscription: Pick<Own, "source" | "shop">,
+  what: "giftNoCard" | "giftNoCancel",
+) {
+  if (subscription.source !== "GIFT") return;
+  throw new PortalError(
+    "gift",
+    portalCopy({
+      singular: subscription.shop.releaseWordSingular,
+      plural: subscription.shop.releaseWordPlural,
+    })[what],
+  );
+}
 const DRAFT_OPEN = `#graphql
   mutation PortalDraftOpen($contract: ID!) {
     subscriptionContractUpdate(contractId: $contract) {
@@ -512,6 +545,7 @@ const SEND_UPDATE = `#graphql
  * Saving the card fires `customer_payment_methods/update`, which recovers a failed payment.
  */
 export async function sendCardUpdateEmail(graphql: Graphql, subscription: Own) {
+  refuseGift(subscription, "giftNoCard");
   const { subscriptionContract } = await graphql(PAYMENT_METHOD, {
     id: subscription.contractGid,
   });
@@ -549,6 +583,7 @@ export async function cancelSubscription(
   subscription: Own,
   now = new Date(),
 ) {
+  refuseGift(subscription, "giftNoCancel");
   if (subscription.status === "CANCELLED") return;
   if (
     await db.billingAttempt.count({

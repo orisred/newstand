@@ -78,6 +78,7 @@ describe("parseSettings", () => {
         orderTiming: "PREORDER_OPENS",
         emailsEnabled: {
           welcome: true,
+          giftReceived: false,
           preorderAnnounced: false,
           upcomingCharge: false,
           failedPayment: false,

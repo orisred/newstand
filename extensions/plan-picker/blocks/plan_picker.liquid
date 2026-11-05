@@ -7,6 +7,11 @@
   Only plans with this app's `app_id` are shown, so another app's plans never appear here.
   The app makes a product with plans require one, so there is no one-time option: the first plan
   is chosen by default.
+
+  A giftable plan (the app lists them in `app.metafields.release_subscriptions.giftable_plans`) also
+  offers "This is a gift": the recipient's email, name and a message, sent as line item properties
+  that the app reads from the subscription contract. They're disabled, so not sent, unless a
+  giftable plan is chosen and the box is ticked. Without JavaScript the gift option never shows.
 {%- endcomment -%}
 {%- liquid
   assign form_id = block.settings.form_id
@@ -20,6 +25,8 @@
     assign legend_class = ' plan-picker__legend--hidden'
   endif
   assign has_plans = false
+  assign gift_plans = ',' | append: app.metafields.release_subscriptions.giftable_plans.value | append: ','
+  assign has_gift_plans = false
   for group in product.selling_plan_groups
     if group.app_id == 'release-subscriptions'
       assign has_plans = true
@@ -35,12 +42,19 @@
       {%- if group.app_id == 'release-subscriptions' -%}
       {%- for plan in group.selling_plans -%}
         {%- assign adjustment = plan.price_adjustments.first -%}
+        {%- assign plan_key = ',' | append: plan.id | append: ',' -%}
+        {%- assign gift_plan = false -%}
+        {%- if gift_plans contains plan_key -%}
+          {%- assign gift_plan = true -%}
+          {%- assign has_gift_plans = true -%}
+        {%- endif -%}
         <label class="plan-picker__option">
           <input
             type="radio"
             name="selling_plan"
             value="{{ plan.id }}"
             form="{{ form_id }}"
+            data-giftable="{{ gift_plan }}"
             {% if first %}checked{% endif %}
             {% unless product.available %}disabled{% endunless %}
           >
@@ -53,6 +67,30 @@
       {%- endfor -%}
       {%- endif -%}
     {%- endfor -%}
+    {%- if has_gift_plans -%}
+      <div class="plan-picker__gift" data-plan-picker-gift hidden>
+        <label class="plan-picker__option">
+          <input type="checkbox" data-gift-toggle>
+          <span class="plan-picker__name">{{ 'plan_picker.gift' | t }}</span>
+        </label>
+        <div class="plan-picker__gift-fields" data-gift-fields hidden>
+          <label class="plan-picker__field">
+            <span>{{ 'plan_picker.gift_email' | t }}</span>
+            <input type="email" name="properties[Gift recipient email]" form="{{ form_id }}" maxlength="254" autocomplete="off" disabled>
+          </label>
+          <label class="plan-picker__field">
+            <span>{{ 'plan_picker.gift_name' | t }}</span>
+            <input type="text" name="properties[Gift recipient name]" form="{{ form_id }}" maxlength="100" autocomplete="off" disabled>
+          </label>
+          <label class="plan-picker__field">
+            <span>{{ 'plan_picker.gift_message' | t }}</span>
+            <textarea name="properties[Gift message]" form="{{ form_id }}" maxlength="500" rows="3" disabled></textarea>
+          </label>
+          <p class="plan-picker__terms">{{ 'plan_picker.gift_note' | t }}</p>
+        </div>
+      </div>
+      <script src="{{ 'plan-picker.js' | asset_url }}" defer></script>
+    {%- endif -%}
     {%- if block.settings.terms != blank -%}
       <p class="plan-picker__terms">{{ block.settings.terms | escape }}</p>
     {%- endif -%}
