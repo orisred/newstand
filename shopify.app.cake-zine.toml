@@ -1,12 +1,11 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 #
-# Cake Zine's production app (docs/CUTOVER.md, B2). The app doesn't exist yet: replace the PLACEHOLDER
-# client_id once it's created, and point application_url at the production Worker (wrangler.jsonc,
-# env "production"). Deploy with `npm run deploy:cake-zine`, which sets the portal's API URL from
-# application_url. Keep webhooks and scopes in step with shopify.app.toml.
+# Cake Zine's production app, CZ Subs (docs/CUTOVER.md, B2). application_url is the production Worker
+# (wrangler.jsonc, env "production"). Deploy with `npm run deploy:cake-zine`, which sets the portal's
+# API URL from application_url. Keep webhooks and scopes in step with shopify.app.toml.
 
-client_id = "PLACEHOLDER_PRODUCTION_CLIENT_ID"
-name = "Release Subscriptions"
+client_id = "3637783c655703e336cf531f8542198d"
+name = "CZ Subs"
 application_url = "https://release-subscriptions-cake-zine.ne-dev.workers.dev"
 embedded = true
 # Cake Zine is on Basic, where a custom app can't run Functions or Flow triggers, so the cart rule
