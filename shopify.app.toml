@@ -25,6 +25,10 @@ api_version = "2026-10"
   uri = "/webhooks/subscription_billing_attempts"
 
   [[webhooks.subscriptions]]
+  topics = [ "customer_payment_methods/update" ]
+  uri = "/webhooks/customer_payment_methods"
+
+  [[webhooks.subscriptions]]
   topics = [ "disputes/create" ]
   uri = "/webhooks/disputes"
 

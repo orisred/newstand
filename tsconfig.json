@@ -1,5 +1,7 @@
 {
   "include": ["env.d.ts", "**/*.ts", "**/*.tsx", ".react-router/types/**/*"],
+  // Its Polaris types for customer accounts clash with the admin's; it has its own tsconfig.
+  "exclude": ["extensions/customer-portal"],
   "compilerOptions": {
     "lib": ["DOM", "DOM.Iterable", "ES2022"],
     "strict": true,

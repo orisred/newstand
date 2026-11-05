@@ -35,6 +35,8 @@ export type EmailData =
       kind: "upcomingCharge";
       plan: string;
       amount: string;
+      /** The portal, where the customer turns off auto-renew or cancels. */
+      portalUrl: string;
       /** A date, a release that triggers the charge, or a renewal held for the last paid release. */
       when:
         | { on: Date; releases: number }
@@ -54,6 +56,7 @@ export type EmailData =
       oldAmount: string;
       newAmount: string;
       effectiveAt: Date;
+      portalUrl: string;
     };
 
 export type Rendered = { subject: string; text: string; html: string };
@@ -90,7 +93,8 @@ function compose(shop: ShopCopy, data: EmailData): Body {
   const word = shop.singular;
   const words = shop.plural;
   const date = (value: Date) => formatDate(value, shop.timezone);
-  const cancel = `To turn off auto-renew, just reply to this email and we'll do it.`;
+  const cancel = `You can turn off auto-renew or cancel any time from your account. The ${words} you've already paid for still ship.`;
+  const manage = (url: string) => ({ label: "Turn off auto-renew or cancel", url });
 
   switch (data.kind) {
     case "welcome":
@@ -144,6 +148,7 @@ function compose(shop: ShopCopy, data: EmailData): Body {
             `On ${date(when.on)}, we'll charge ${amount} plus any tax to your card on file to renew ${plan} for another ${when.releases} ${when.releases === 1 ? word : words}. Auto-renew is on.`,
             cancel,
           ],
+          button: manage(data.portalUrl),
         };
       }
       if ("release" in when) {
@@ -153,6 +158,7 @@ function compose(shop: ShopCopy, data: EmailData): Body {
             `${when.release} is in pre-order. When it starts shipping, we'll charge ${amount} plus any tax to your card on file for ${plan} and create your order. Auto-renew is on.`,
             cancel,
           ],
+          button: manage(data.portalUrl),
         };
       }
       return {
@@ -161,6 +167,7 @@ function compose(shop: ShopCopy, data: EmailData): Body {
           `Your ${plan} term ended on ${date(when.held)}, but your last paid ${word} hasn't shipped yet. We'll renew and charge ${amount} plus any tax to your card on file when it starts shipping. There's nothing you need to do.`,
           cancel,
         ],
+        button: manage(data.portalUrl),
       };
     }
     case "failedPayment":
@@ -187,8 +194,9 @@ function compose(shop: ShopCopy, data: EmailData): Body {
         subject: `Price change for ${data.plan}`,
         paragraphs: [
           `From ${date(data.effectiveAt)}, the price of ${data.plan} goes from ${data.oldAmount} to ${data.newAmount}, each plus any tax.`,
-          `It applies to your first charge on or after ${date(data.effectiveAt)}; nothing changes before then. If you'd rather not continue, you can cancel before then: just reply to this email and we'll do it.`,
+          `It applies to your first charge on or after ${date(data.effectiveAt)}; nothing changes before then. If you'd rather not continue, you can cancel before then from your account. The ${words} you've already paid for still ship.`,
         ],
+        button: manage(data.portalUrl),
       };
   }
 }

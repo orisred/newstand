@@ -1,17 +1,20 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- a fake of Shopify's loosely typed responses */
-import { applyD1Migrations, env } from "cloudflare:test";
+import { applyD1Migrations, createMessageBatch, env } from "cloudflare:test";
 import type { ActionFunctionArgs } from "react-router";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
+  BILLING_RESUME_JOB,
   findLostResults,
   findRenewals,
   findRetries,
   recordChargeback,
   recoverAttempt,
   renewalDue,
+  resumeAfterCardUpdate,
   renewIfDue,
   retryCharge,
   retryDue,
+  runResumeJob,
   settleAttempt,
   termChargeFor,
   worthRetrying,
@@ -27,7 +30,7 @@ import type {
 } from "../app/generated/prisma/enums";
 import { redactCustomer } from "../app/gdpr.server";
 import { billingAttemptKey } from "../app/jobs/idempotency.server";
-import type { Job } from "../app/jobs/runner.server";
+import { consumeJobs, type Job } from "../app/jobs/runner.server";
 import type { Graphql } from "../app/plan-sync.server";
 import { parsePlan, updatePlan } from "../app/plans.server";
 import { buildRunCsv } from "../app/release-csv.server";
@@ -1103,6 +1106,114 @@ describe("a failed card", () => {
       releasesRemaining: 1,
     });
     expect((await deliveryOf(subscriber.id, release.id))?.status).toBe("PENDING");
+  });
+
+  it("a customer's retry can't start a second charge while a bank's challenge may still be completed", async () => {
+    const { shopify, subscriber, release } = await failing("ACTION_REQUIRED");
+    shopify.state.decline = null;
+    const chargesBefore = shopify.charges().length;
+    // The card update, or the portal's button: nothing new is attempted.
+    expect(await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, false, NOW)).toEqual([]);
+    expect(await attemptsOf(subscriber.id)).toHaveLength(1);
+    expect(shopify.charges()).toHaveLength(chargesBefore);
+    // Completing the challenge is what pays, once.
+    shopify.finish([...shopify.attempts.values()][0]);
+    await deliverWebhooks(shopify);
+    expect(await row(subscriber.id)).toMatchObject({ status: "ACTIVE", releasesRemaining: 1 });
+    expect((await deliveryOf(subscriber.id, release.id))?.status).toBe("PENDING");
+  });
+
+  it("the merchant's retry, and a customer's once the challenge is old, still go through", async () => {
+    const { shopify, subscriber } = await failing("ACTION_REQUIRED");
+    shopify.state.decline = null;
+    await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, true, NOW);
+    expect(await attemptsOf(subscriber.id)).toHaveLength(2);
+
+    const old = await failing("ACTION_REQUIRED");
+    old.shopify.state.decline = null;
+    await retryCharge(db(), env.DB, old.shopify.graphql, old.subscriber.id, false, days(4));
+    expect(await attemptsOf(old.subscriber.id)).toHaveLength(2);
+  });
+
+  it("a customer can't run charge attempts against a failing card more than twice an hour", async () => {
+    const { shopify, subscriber } = await failing("INSUFFICIENT_FUNDS");
+    expect(await attemptsOf(subscriber.id)).toHaveLength(1);
+    // One retry fits after the attempt that failed, then they are held off.
+    await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, false, NOW);
+    await deliverWebhooks(shopify);
+    expect(await attemptsOf(subscriber.id)).toHaveLength(2);
+    for (let press = 0; press < 5; press++) {
+      await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, false, NOW);
+    }
+    expect(await attemptsOf(subscriber.id)).toHaveLength(2);
+    expect(shopify.attempts.size).toBe(2);
+    // A merchant's press isn't held off, and the customer is free again an hour later.
+    await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, true, NOW);
+    expect(await attemptsOf(subscriber.id)).toHaveLength(3);
+    await deliverWebhooks(shopify);
+    await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, false, new Date(NOW.getTime() + 61 * 60 * 1000));
+    expect(await attemptsOf(subscriber.id)).toHaveLength(4);
+  });
+
+  it("a saved card is retried once even right after a bank's challenge and past the hourly limit", async () => {
+    // The challenge: the customer's button is held off, the new card is not.
+    const challenged = await failing("ACTION_REQUIRED");
+    challenged.shopify.state.decline = null;
+    expect(await retryCharge(db(), env.DB, challenged.shopify.graphql, challenged.subscriber.id, false, NOW)).toEqual([]);
+    expect(await attemptsOf(challenged.subscriber.id)).toHaveLength(1);
+    await retryCharge(db(), env.DB, challenged.shopify.graphql, challenged.subscriber.id, false, NOW, true);
+    expect(await attemptsOf(challenged.subscriber.id)).toHaveLength(2);
+
+    // Two attempts in the hour: the button is held off, the new card is not.
+    const busy = await failing("INSUFFICIENT_FUNDS");
+    await retryCharge(db(), env.DB, busy.shopify.graphql, busy.subscriber.id, false, NOW);
+    await deliverWebhooks(busy.shopify);
+    expect(await attemptsOf(busy.subscriber.id)).toHaveLength(2);
+    await retryCharge(db(), env.DB, busy.shopify.graphql, busy.subscriber.id, false, NOW);
+    expect(await attemptsOf(busy.subscriber.id)).toHaveLength(2);
+    busy.shopify.state.decline = null;
+    await retryCharge(db(), env.DB, busy.shopify.graphql, busy.subscriber.id, false, NOW, true);
+    expect(await attemptsOf(busy.subscriber.id)).toHaveLength(3);
+  });
+
+  it("the same card webhook delivered twice charges once, and a card saved is not the merchant", async () => {
+    const { shop, shopify, subscriber } = await failing("INSUFFICIENT_FUNDS");
+    shopify.state.decline = null;
+    const jobs = await resumeAfterCardUpdate(db(), shop.shopDomain, subscriber.customerGid, "hook-same");
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].data).toMatchObject({ byMerchant: false, savedCard: true });
+
+    const handlers = {
+      [BILLING_RESUME_JOB]: async (job: Job, { db: jobDb, env: jobEnv }: any) => {
+        await runResumeJob(jobDb, jobEnv.DB, shopify.graphql, job);
+      },
+    };
+    // The queue can deliver a message twice, and Shopify can send a webhook twice with the same ID.
+    const twice = await resumeAfterCardUpdate(db(), shop.shopDomain, subscriber.customerGid, "hook-same");
+    expect(twice.map((job) => job.id)).toEqual(jobs.map((job) => job.id));
+    const batch = createMessageBatch<unknown>("release-subscriptions-jobs", [jobs[0], twice[0]].map((body, i) => ({
+      id: `saved-${++n}-${i}`,
+      timestamp: new Date(),
+      attempts: 1,
+      body,
+    })));
+    await consumeJobs(batch, env, handlers);
+    expect(await attemptsOf(subscriber.id)).toHaveLength(2);
+    expect(shopify.attempts.size).toBe(2);
+  });
+
+  it("a saved card doesn't end a chargeback hold, only the merchant does", async () => {
+    const { shop, shopify, subscriber } = await failing("INSUFFICIENT_FUNDS");
+    await db().subscription.update({
+      where: { id: subscriber.id },
+      data: { status: "PAUSED", pausedReason: "CHARGEBACK", paymentProblemSince: NOW },
+    });
+    shopify.state.decline = null;
+    expect(await resumeAfterCardUpdate(db(), shop.shopDomain, subscriber.customerGid, "hook-cb")).toEqual([]);
+    // Even if the job were sent anyway, with the flag set.
+    expect(await retryCharge(db(), env.DB, shopify.graphql, subscriber.id, false, NOW, true)).toEqual([]);
+    expect(await attemptsOf(subscriber.id)).toHaveLength(1);
+    expect(await row(subscriber.id)).toMatchObject({ status: "PAUSED", pausedReason: "CHARGEBACK" });
   });
 
   it("a bundle's held release shows on the screen and in the CSV, and isn't refused", async () => {

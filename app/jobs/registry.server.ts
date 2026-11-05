@@ -4,14 +4,16 @@ import {
   BILLING_RESUME_JOB,
   BILLING_RETRY_JOB,
   BILLING_SETTLE_JOB,
+  CARD_UPDATED_JOB,
   DISPUTE_JOB,
   findLostResults,
   findRenewals,
   findRetries,
   recordChargeback,
   recoverAttempt,
+  resumeAfterCardUpdate,
+  runResumeJob,
   renewIfDue,
-  retryCharge,
   retryDue,
   settleAttempt,
 } from "../billing.server";
@@ -160,12 +162,18 @@ export const jobHandlers: Record<string, JobHandler> = {
     const graphql = await shopGraphql(job.shop);
     await enqueueJobs(
       env,
-      await retryCharge(
+      await runResumeJob(db, env.DB, graphql, job),
+    );
+  },
+
+  [CARD_UPDATED_JOB]: async (job, { db, env }) => {
+    await enqueueJobs(
+      env,
+      await resumeAfterCardUpdate(
         db,
-        env.DB,
-        graphql,
-        String(job.data?.subscriptionId),
-        job.data?.byMerchant === true,
+        job.shop!,
+        String(job.data?.customerGid),
+        String(job.data?.webhookId),
       ),
     );
   },
