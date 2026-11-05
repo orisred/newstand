@@ -1,4 +1,5 @@
 import {
+  attachSavedCards,
   BILLING_RECOVER_JOB,
   BILLING_RENEW_JOB,
   BILLING_RESUME_JOB,
@@ -45,6 +46,7 @@ import {
   redactShop,
 } from "../gdpr.server";
 import { markPaymentOrderFulfilled } from "../payment-orders.server";
+import { findPruneWork, PRUNE_JOB, pruneOldRows } from "../prune.server";
 import { graphqlOf, syncPlan } from "../plan-sync.server";
 import { SYNC_JOB } from "../plans.server";
 import { createDeliveryOrder } from "../release-orders.server";
@@ -164,7 +166,7 @@ export const jobHandlers: Record<string, JobHandler> = {
 
   [BILLING_RETRY_JOB]: async (job, { db, env }) => {
     const graphql = await shopGraphql(job.shop);
-    await retryDue(db, env.DB, graphql, String(job.data?.attemptId));
+    await enqueueJobs(env, await retryDue(db, env.DB, graphql, String(job.data?.attemptId)));
   },
 
   // A merchant's press, and in Step 11 a customer's new card.
@@ -177,15 +179,9 @@ export const jobHandlers: Record<string, JobHandler> = {
   },
 
   [CARD_UPDATED_JOB]: async (job, { db, env }) => {
-    await enqueueJobs(
-      env,
-      await resumeAfterCardUpdate(
-        db,
-        job.shop!,
-        String(job.data?.customerGid),
-        String(job.data?.webhookId),
-      ),
-    );
+    const customerGid = String(job.data?.customerGid);
+    await attachSavedCards(db, () => shopGraphql(job.shop), job.shop!, customerGid);
+    await enqueueJobs(env, await resumeAfterCardUpdate(db, job.shop!, customerGid));
   },
 
   [DISPUTE_JOB]: async (job, { db, env }) => {
@@ -224,6 +220,10 @@ export const jobHandlers: Record<string, JobHandler> = {
   [IMPORT_CREATE_JOB]: async (job, { db, env }) => {
     const next = await runCreateSlice(db, env.DB, () => shopGraphql(job.shop), job);
     if (next) await enqueueJobs(env, [next.job], next.delaySeconds);
+  },
+
+  [PRUNE_JOB]: async (_job, { env }) => {
+    await pruneOldRows(env.DB);
   },
 
   [GDPR_JOB]: async (job, { db, env }) => {
@@ -279,4 +279,5 @@ export const dueWorkFinders: DueWorkFinder[] = [
   findRetries,
   findLostResults,
   findImportWork,
+  findPruneWork,
 ];

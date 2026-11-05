@@ -2,14 +2,18 @@ import type { createDb } from "./db.server";
 import { billingAttemptKey } from "./jobs/idempotency.server";
 import type { DueWorkFinder, Job } from "./jobs/runner.server";
 import { describeError, logEvent } from "./logger.server";
-import { PAUSED_EVENT } from "./notification-jobs";
+import { noticeGiven, PAUSED_EVENT } from "./notification-jobs";
 import type { Graphql } from "./plan-sync.server";
 import {
   addMonths,
   markCancelled,
+  PAST_REACHED,
   paymentOrderJob,
   releaseRunJob,
+  termChargeFor,
 } from "./subscriptions.server";
+
+export { termChargeFor };
 
 type Db = ReturnType<typeof createDb>;
 
@@ -23,6 +27,8 @@ export const DISPUTE_JOB = "billing.dispute";
 
 export const FAILED_PAYMENT = "FAILED_PAYMENT";
 export const CHARGEBACK = "CHARGEBACK";
+/** A second success on a charge already paid: not credited, and shown to the merchant to refund. */
+export const DOUBLE_CHARGE_EVENT = "billing.double_charge";
 
 /** Days to wait before each retry: three tries, on days 0, 3 and 7, then a pause. */
 const RETRY_AFTER_DAYS = [3, 4];
@@ -30,8 +36,11 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 /** A customer's retry is refused once a charge has had this many attempts in the last hour, however they started. */
 const CUSTOMER_RETRY_WINDOW_MS = 60 * 60 * 1000;
 const MAX_ATTEMPTS_PER_WINDOW = 2;
-/** How long a bank's challenge is assumed completable. Shopify doesn't say; a merchant's retry ignores it. */
-const CHALLENGE_WAIT_MS = 3 * DAY_MS;
+/** And this many on one charge in 30 days, whoever started them: it's what the card networks see. Deliberately low. */
+const CUSTOMER_RETRY_MONTH_MS = 30 * DAY_MS;
+const MAX_ATTEMPTS_PER_MONTH = 5;
+/** Webhooks for a saved card inside one of these count as one save, so a declining card gets one try. */
+const CARD_SAVE_WINDOW_MS = 5 * 60 * 1000;
 /** A result still unknown after this is looked up: Shopify took about 2 seconds when measured. */
 const LOST_RESULT_AFTER_MS = 10 * 60 * 1000;
 
@@ -94,6 +103,10 @@ const CONTRACT = `#graphql
     subscriptionContract(id: $id) {
       status
       deliveryPrice { amount }
+      deliveryMethod {
+        ... on SubscriptionDeliveryMethodShipping { address { address1 } }
+        ... on SubscriptionDeliveryMethodLocalDelivery { address { address1 } }
+      }
       lines(first: 50) { nodes { id sellingPlanId currentPrice { amount } } }
     }
   }`;
@@ -114,7 +127,7 @@ const RESULT = `#graphql
       completedAt
       state {
         __typename
-        ... on SubscriptionBillingAttemptSuccessState { order { id } }
+        ... on SubscriptionBillingAttemptSuccessState { order { id name } }
         ... on SubscriptionBillingAttemptFailedState {
           error {
             __typename
@@ -175,18 +188,9 @@ const ORDER_CONTRACTS = `#graphql
     order(id: $id) { lineItems(first: 50) { nodes { contract { id } } } }
   }`;
 
-/** The middle of a bundle renewal's key. It has no release, and a term renews once. */
-export const termChargeFor = (termEndsAt: Date) => `term-${termEndsAt.getTime()}`;
 const isTermCharge = (chargeFor: string) => chargeFor.startsWith("term-");
 
-/** A subscription's first release, moved past every release that has reached its order step. */
-const PAST_REACHED = `MAX("firstReleaseNumber", 1 + COALESCE((
-  SELECT MAX(r."number") FROM "Release" r JOIN "Shop" sh ON sh."id" = r."shopId"
-  WHERE r."shopId" = "Subscription"."shopId"
-    AND (r."status" IN ('READY', 'SHIPPED')
-      OR (r."status" = 'PREORDER' AND sh."orderTiming" = 'PREORDER_OPENS'))), 0))`;
-
-/** Payload is IDs only. The ID makes a repeat do nothing. */
+/** Payload is IDs only. The ID makes a repeat do nothing. `onlyIf` is a condition on ?6, the attempt. */
 function eventStatement(
   rawDb: D1Database,
   key: string,
@@ -194,13 +198,15 @@ function eventStatement(
   shopId: string,
   subscriptionId: string,
   payload: Record<string, string | number | null>,
+  onlyIf?: { sql: string; attemptId: string },
 ) {
+  const values = [`${type}:${key}`, shopId, subscriptionId, type, JSON.stringify(payload)];
   return rawDb
     .prepare(
       `INSERT INTO "Event" ("id", "shopId", "subscriptionId", "type", "payload")
-       VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT ("id") DO NOTHING`,
+       SELECT ?1, ?2, ?3, ?4, ?5 WHERE ${onlyIf?.sql ?? "1"} ON CONFLICT ("id") DO NOTHING`,
     )
-    .bind(`${type}:${key}`, shopId, subscriptionId, type, JSON.stringify(payload));
+    .bind(...values, ...(onlyIf ? [onlyIf.attemptId] : []));
 }
 
 /**
@@ -216,7 +222,6 @@ async function applyPriceChange(
     id: string;
     contractGid: string;
     planId: string;
-    source: string;
     sellingPlanGid: string | null;
     createdAt: Date;
     lockedPriceCents: number | null;
@@ -233,11 +238,26 @@ async function applyPriceChange(
     change.policy !== "APPLY_AT_RENEWAL" ||
     change.effectiveAt > now ||
     subscription.createdAt >= change.effectiveAt ||
-    // Imported after the change was saved, so its notice never reached them. They keep what they pay.
-    (subscription.source === "IMPORTED" && subscription.createdAt > change.createdAt) ||
     subscription.lockedPriceCents === change.newPriceCents
   ) {
     return;
+  }
+  // A rise needs this subscriber's own notice to have really gone, in time. `noticeSentAt` can't say:
+  // it is set once every row has settled, including FAILED and UNSURE ones. No row means they were never
+  // owed one: a sign-up or import after the rise was saved, at the old price. They keep what they pay.
+  if (subscription.lockedPriceCents === null || change.newPriceCents > subscription.lockedPriceCents) {
+    const notice = await db.emailSend.findUnique({
+      where: { id: `priceChange:${subscription.id}:${change.id}` },
+      select: { status: true, sentAt: true },
+    });
+    if (notice?.status !== "SENT" || !noticeGiven(notice.sentAt, now)) {
+      logEvent("warn", "billing.price_held", {
+        subscriptionId: subscription.id,
+        priceChangeId: change.id,
+        notice: notice?.status ?? "none",
+      });
+      return;
+    }
   }
   const stale = lines.filter(
     (line) =>
@@ -306,12 +326,15 @@ async function attachSavedCard(
   await db.subscription.updateMany({ where: { id: subscriptionId }, data: { noCardSince: null } });
 }
 
+const NO_ADDRESS_MESSAGE = "This subscription's contract has no delivery address.";
+
 export type ChargeResult =
   | "sent"
   | "already" // this try has finished, so it can't be sent again
   | "not_chargeable"
   | "contract_closed"
-  | "contract_not_active";
+  | "contract_not_active"
+  | "no_address";
 
 /**
  * One try at one charge. The row goes in before Shopify hears of it, so a webhook always finds it
@@ -387,6 +410,25 @@ async function attemptCharge(
   if (existing && existing.result !== "PENDING") return "already";
 
   if (!existing) {
+    // The last word on any retry, whatever asked for it: a charge already paid is never tried again.
+    if (
+      attempt > 1 &&
+      (await db.billingAttempt.count({
+        where: { subscriptionId, chargeFor, result: { in: ["SUCCEEDED", "DUPLICATE"] } },
+      })) > 0
+    ) {
+      return "already";
+    }
+    // A release's charge pays for its order, and Shopify would refuse an order with no address. So no
+    // charge, and the Delivery shows why, as a refused order does. A bundle's renewal buys no one order.
+    if (attempt === 1 && !isTermCharge(chargeFor) && !contract.deliveryMethod?.address) {
+      await db.delivery.updateMany({
+        where: { subscriptionId, releaseId: chargeFor, orderGid: null },
+        data: { orderError: NO_ADDRESS_MESSAGE },
+      });
+      logEvent("warn", "billing.no_address", { subscriptionId, chargeFor });
+      return "no_address";
+    }
     if (attempt === 1) {
       await applyPriceChange(
         db,
@@ -395,7 +437,6 @@ async function attemptCharge(
           id: subscriptionId,
           contractGid,
           planId: subscription.planId,
-          source: subscription.source,
           sellingPlanGid: subscription.plan.sellingPlanGid,
           createdAt: subscription.createdAt,
           lockedPriceCents: subscription.lockedPriceCents,
@@ -507,6 +548,7 @@ export async function settleAttempt(
         rawDb,
         row.id,
         attempt.state.order?.id ?? null,
+        attempt.state.order?.name ?? null,
         new Date(attempt.completedAt ?? now),
         now,
       );
@@ -528,13 +570,19 @@ export async function settleAttempt(
   }
 }
 
+/** Whether this charge, the one the attempt in `param` belongs to, has a success on another attempt or this one. */
+const chargePaid = (param: string, otherOnly = false) => `EXISTS (
+  SELECT 1 FROM "BillingAttempt" a JOIN "BillingAttempt" b
+    ON b."subscriptionId" = a."subscriptionId" AND b."chargeFor" = a."chargeFor"
+  WHERE a."id" = ${param} AND b."result" = 'SUCCEEDED'${otherOnly ? ` AND b."id" <> a."id"` : ""})`;
+
 /**
  * The next three take ?1 subscription, ?2 attempt, ?3 stamp. With an attempt they run only until
- * that attempt is marked as succeeded, and marking it comes last in the batch, so one of any
- * number of repeats does the work. Without one they aren't tied to a payment.
+ * that charge is marked as paid, and marking it comes last in the batch, so one of any number of
+ * repeats does the work, and a second success on the same charge does none. Without one they
+ * aren't tied to a payment.
  */
-const NOT_YET_SUCCEEDED = `(?2 = '' OR EXISTS (
-  SELECT 1 FROM "BillingAttempt" WHERE "id" = ?2 AND "result" <> 'SUCCEEDED'))`;
+const NOT_YET_SUCCEEDED = `(?2 = '' OR NOT ${chargePaid("?2")})`;
 
 /** Lets the oldest HELD Deliveries go, as far as paid releases cover them. A chargeback keeps them. */
 function releaseHeld(rawDb: D1Database, subscriptionId: string, stamp: string, attemptId = "") {
@@ -599,6 +647,7 @@ async function recordSuccess(
   rawDb: D1Database,
   attemptId: string,
   orderGid: string | null,
+  orderName: string | null,
   chargedAt: Date,
   now: Date,
 ): Promise<Job[]> {
@@ -632,7 +681,7 @@ async function recordSuccess(
         ).toISOString()
       : null;
   const stamp = now.toISOString();
-  await rawDb.batch([
+  const results = await rawDb.batch([
     rawDb
       .prepare(
         `UPDATE "Subscription" SET
@@ -648,11 +697,25 @@ async function recordSuccess(
     dropHeld(rawDb, subscriptionId, stamp, attemptId),
     ...(renewal ? [] : [skipMissed(rawDb, subscriptionId, stamp, attemptId)]),
     clearProblemWhenDone(rawDb, subscriptionId, stamp, attemptId),
-    eventStatement(rawDb, attemptId, "billing.succeeded", subscription.shopId, subscriptionId, {
-      chargeFor,
-      attempt: row.attempt,
-      orderGid,
-    }),
+    eventStatement(
+      rawDb,
+      attemptId,
+      "billing.succeeded",
+      subscription.shopId,
+      subscriptionId,
+      { chargeFor, attempt: row.attempt, orderGid },
+      { sql: `NOT ${chargePaid("?6", true)}`, attemptId },
+    ),
+    // The customer paid twice for one charge. Crediting it would hide that, so it's for the merchant to refund.
+    eventStatement(
+      rawDb,
+      attemptId,
+      DOUBLE_CHARGE_EVENT,
+      subscription.shopId,
+      subscriptionId,
+      { chargeFor, attempt: row.attempt, orderGid, orderName },
+      { sql: chargePaid("?6", true), attemptId },
+    ),
     rawDb
       .prepare(
         `UPDATE "BillingAttempt" SET "nextRetryAt" = NULL, "updatedAt" = ?3
@@ -661,13 +724,14 @@ async function recordSuccess(
       .bind(subscriptionId, chargeFor, stamp),
     rawDb
       .prepare(
-        `UPDATE "BillingAttempt" SET "result" = 'SUCCEEDED', "orderGid" = ?2, "errorCode" = NULL,
-           "nextRetryAt" = NULL, "updatedAt" = ?3
-         WHERE "id" = ?1 AND "result" <> 'SUCCEEDED'`,
+        `UPDATE "BillingAttempt" SET "orderGid" = ?2, "errorCode" = NULL, "nextRetryAt" = NULL, "updatedAt" = ?3,
+           "result" = CASE WHEN ${chargePaid("?1", true)} THEN 'DUPLICATE' ELSE 'SUCCEEDED' END
+         WHERE "id" = ?1 AND "result" NOT IN ('SUCCEEDED', 'DUPLICATE')`,
       )
       .bind(attemptId, orderGid, stamp),
   ]);
-  logEvent("info", "billing.succeeded", {
+  const doubled = results[results.length - 3].meta.changes > 0;
+  logEvent(doubled ? "error" : "info", doubled ? "billing.double_charge" : "billing.succeeded", {
     subscriptionId,
     chargeFor,
     attempt: row.attempt,
@@ -721,7 +785,9 @@ async function recordFailure(
       ? null
       : new Date(now.getTime() + retryAfter * DAY_MS).toISOString();
   const stamp = now.toISOString();
-  const open = `EXISTS (SELECT 1 FROM "BillingAttempt" WHERE "id" = ?2 AND "result" = 'PENDING')`;
+  // A failure landing after another try paid this charge changes nothing: no problem, no retry, no email.
+  const unpaid = `NOT ${chargePaid("?2")}`;
+  const open = `EXISTS (SELECT 1 FROM "BillingAttempt" WHERE "id" = ?2 AND "result" = 'PENDING') AND ${unpaid}`;
   const paused = retryAfter === undefined;
   await rawDb.batch([
     // The release this charge was for waits for the payment, visibly.
@@ -741,20 +807,33 @@ async function recordFailure(
          WHERE "id" = ?1 AND "status" IN ('ACTIVE', 'PAUSED') AND ${open}`,
       )
       .bind(subscriptionId, attemptId, paused ? 1 : 0, stamp),
-    eventStatement(rawDb, attemptId, "billing.failed", subscription.shopId, subscriptionId, {
-      chargeFor,
-      attempt,
-      errorCode,
-      nextRetryAt,
-    }),
+    eventStatement(
+      rawDb,
+      attemptId,
+      "billing.failed",
+      subscription.shopId,
+      subscriptionId,
+      { chargeFor, attempt, errorCode, nextRetryAt },
+      { sql: `NOT ${chargePaid("?6")}`, attemptId },
+    ),
     // For Flow, when the failure also paused the subscription.
     ...(paused && subscription.status === "ACTIVE"
-      ? [eventStatement(rawDb, attemptId, PAUSED_EVENT, subscription.shopId, subscriptionId, { chargeFor })]
+      ? [
+          eventStatement(
+            rawDb,
+            attemptId,
+            PAUSED_EVENT,
+            subscription.shopId,
+            subscriptionId,
+            { chargeFor },
+            { sql: `NOT ${chargePaid("?6")}`, attemptId },
+          ),
+        ]
       : []),
     rawDb
       .prepare(
-        `UPDATE "BillingAttempt" SET "result" = 'FAILED', "errorCode" = ?2, "nextRetryAt" = ?3,
-           "updatedAt" = ?4
+        `UPDATE "BillingAttempt" SET "result" = 'FAILED', "errorCode" = ?2, "updatedAt" = ?4,
+           "nextRetryAt" = CASE WHEN ${chargePaid("?1")} THEN NULL ELSE ?3 END
          WHERE "id" = ?1 AND "result" = 'PENDING'`,
       )
       .bind(attemptId, errorCode, nextRetryAt, stamp),
@@ -965,6 +1044,36 @@ export async function chargeRelease(
   return { sent, waiting: unsent + waiting };
 }
 
+/**
+ * What Shopify says now about a charge's earlier tries that a bank challenged, before a new try. It can
+ * tell us if one has paid, and whether one can still be completed, but offers no way to call one off, so
+ * the only choice is whether to try again (see "Double charges" in DECISIONS.md). A paid one is credited here.
+ */
+async function askAboutChallenges(
+  db: Db,
+  rawDb: D1Database,
+  graphql: Graphql,
+  tries: { errorCode: string | null; shopifyAttemptGid: string | null }[],
+  now: Date,
+) {
+  const result = { paid: false, open: false, jobs: [] as Job[] };
+  for (const { errorCode, shopifyAttemptGid: gid } of tries) {
+    if (errorCode !== "ACTION_REQUIRED" || !gid) continue;
+    const { subscriptionBillingAttempt: fresh } = await graphql(RESULT, { id: gid });
+    switch (fresh?.state.__typename) {
+      case "SubscriptionBillingAttemptSuccessState":
+        result.paid = true;
+        result.jobs.push(...(await settleAttempt(db, rawDb, graphql, gid, now)));
+        break;
+      case "SubscriptionBillingAttemptActionRequiredState":
+      case "SubscriptionBillingAttemptPendingState":
+        result.open = true;
+        break;
+    }
+  }
+  return result;
+}
+
 /** A failed charge's next scheduled try. Its ID holds the row, so it only ever asks for one more. */
 export async function retryDue(
   db: Db,
@@ -972,7 +1081,7 @@ export async function retryDue(
   graphql: Graphql,
   attemptId: string,
   now = new Date(),
-) {
+): Promise<Job[]> {
   const row = await db.billingAttempt.findUnique({
     where: { id: attemptId },
     select: {
@@ -983,8 +1092,21 @@ export async function retryDue(
       subscriptionId: true,
     },
   });
-  if (!row || row.result !== "FAILED" || !row.nextRetryAt) return;
+  if (!row || row.result !== "FAILED" || !row.nextRetryAt) return [];
   const { subscriptionId, chargeFor } = row;
+  const challenges = await askAboutChallenges(
+    db,
+    rawDb,
+    graphql,
+    await db.billingAttempt.findMany({
+      where: { subscriptionId, chargeFor },
+      select: { errorCode: true, shopifyAttemptGid: true },
+    }),
+    now,
+  );
+  if (challenges.paid) return challenges.jobs;
+  // It stays due, so the tick asks again next hour.
+  if (challenges.open) return [];
   const stillOwed =
     isTermCharge(chargeFor) ||
     (await db.delivery.count({
@@ -993,7 +1115,7 @@ export async function retryDue(
   const result = stillOwed
     ? await attemptCharge(db, rawDb, graphql, subscriptionId, chargeFor, row.attempt + 1, now)
     : "not_chargeable";
-  if (result === "sent" || result === "already") return;
+  if (result === "sent" || result === "already") return [];
   const stamp = now.toISOString();
   await rawDb.batch([
     rawDb
@@ -1001,8 +1123,10 @@ export async function retryDue(
       .bind(attemptId, stamp),
     // The release was cancelled, say: then nothing is owed.
     ...(isTermCharge(chargeFor) ? [] : [skipMissed(rawDb, subscriptionId, stamp)]),
-    clearProblemWhenDone(rawDb, subscriptionId, stamp),
+    // A renewal is still unpaid if the contract is only paused in Shopify, so the merchant keeps seeing it.
+    ...(result === "contract_not_active" ? [] : [clearProblemWhenDone(rawDb, subscriptionId, stamp)]),
   ]);
+  return [];
 }
 
 /**
@@ -1024,11 +1148,13 @@ export async function retryCharge(
     select: {
       status: true,
       pausedReason: true,
+      paymentProblemSince: true,
       plan: { select: { billingMode: true } },
       shop: { select: { shopDomain: true } },
     },
   });
-  if (!subscription) return [];
+  // Nothing to recover, so nothing to charge: an old failed attempt on file isn't a debt.
+  if (!subscription?.paymentProblemSince) return [];
   const { status, pausedReason, plan, shop } = subscription;
   const chargeback = pausedReason === CHARGEBACK;
   // Only the merchant ends a chargeback, and it can outlast a cancellation.
@@ -1091,33 +1217,33 @@ export async function retryCharge(
     await lift(status === "PAUSED" && pausedReason === FAILED_PAYMENT);
     return afterPayment(db, subscriptionId, shop.shopDomain, crypto.randomUUID(), null);
   }
-  const last = await db.billingAttempt.findFirst({
+  const tries = await db.billingAttempt.findMany({
     where: { subscriptionId, chargeFor },
     orderBy: { attempt: "desc" },
-    select: { attempt: true, result: true, errorCode: true, createdAt: true },
+    select: { attempt: true, result: true, errorCode: true, createdAt: true, shopifyAttemptGid: true },
   });
-  if (last?.result === "SUCCEEDED") return [];
-  // A customer's card update or "try again" can come at any time and as often as they like, so it
-  // is held to two rules a merchant's press isn't (see "Customers can start a charge" in DECISIONS.md).
-  // A newly saved card is the customer asking for exactly one try, so it skips both (N, 2026-11-04).
-  // It is not the merchant: only `byMerchant` ends a chargeback.
-  if (!byMerchant && !savedCard && last) {
-    // A bank's challenge may still be completed, and that attempt would charge as well as this one.
-    const challenged =
-      last.errorCode === "ACTION_REQUIRED" &&
-      now.getTime() - last.createdAt.getTime() < CHALLENGE_WAIT_MS;
-    const recent = await db.billingAttempt.count({
-      where: {
-        subscriptionId,
-        chargeFor,
-        createdAt: { gt: new Date(now.getTime() - CUSTOMER_RETRY_WINDOW_MS) },
-      },
-    });
-    if (challenged || recent >= MAX_ATTEMPTS_PER_WINDOW) {
-      logEvent("info", "billing.customer_retry_declined", {
-        subscriptionId,
-        reason: challenged ? "bank_challenge" : "too_soon",
-      });
+  const last = tries[0];
+  if (tries.some(({ result }) => result === "SUCCEEDED")) return [];
+  const challenges = await askAboutChallenges(db, rawDb, graphql, tries, now);
+  if (challenges.paid) return challenges.jobs;
+  // A newly saved card is the customer asking for exactly one try, so it goes ahead even past an open
+  // challenge and the hourly limit (N, 2026-11-04). It is not the merchant: only `byMerchant` ends a
+  // chargeback. Anyone else waits while a challenge can still be completed, because that would charge as
+  // well as this. See "Double charges" and "Customers can start a charge" in DECISIONS.md.
+  if (challenges.open && !savedCard) {
+    logEvent("info", "billing.retry_declined", { subscriptionId, reason: "bank_challenge" });
+    return [];
+  }
+  // A customer's "try again" can come at any time and as often as they like. A merchant's press isn't limited.
+  if (!byMerchant && !savedCard) {
+    const recent = tries.filter(
+      ({ createdAt }) => createdAt.getTime() > now.getTime() - CUSTOMER_RETRY_WINDOW_MS,
+    ).length;
+    const thisMonth = tries.filter(
+      ({ createdAt }) => createdAt.getTime() > now.getTime() - CUSTOMER_RETRY_MONTH_MS,
+    ).length;
+    if (recent >= MAX_ATTEMPTS_PER_WINDOW || thisMonth >= MAX_ATTEMPTS_PER_MONTH) {
+      logEvent("info", "billing.retry_declined", { subscriptionId, reason: "too_soon" });
       return [];
     }
   }
@@ -1239,8 +1365,36 @@ export const cardUpdatedJob = (shop: string, customerGid: string, webhookId: str
   type: CARD_UPDATED_JOB,
   id: `${CARD_UPDATED_JOB}:${customerGid}:${webhookId}`,
   shop,
-  data: { customerGid, webhookId },
+  data: { customerGid },
 });
+
+/**
+ * A customer saved a card, and a contract of theirs has none. It goes on the contract now rather than at the
+ * next charge, so the no-card flag says what's true, and it charges nothing. No such contract asks Shopify nothing.
+ */
+export async function attachSavedCards(
+  db: Db,
+  graphqlFor: () => Promise<Graphql>,
+  shop: string,
+  customerGid: string,
+) {
+  const waiting = await db.subscription.findMany({
+    where: {
+      customerGid,
+      shop: { shopDomain: shop },
+      noCardSince: { not: null },
+      status: { in: ["ACTIVE", "PAUSED"] },
+      source: { not: "GIFT" },
+      contractGid: { not: null },
+    },
+    select: { id: true, contractGid: true },
+  });
+  if (waiting.length === 0) return;
+  const graphql = await graphqlFor();
+  for (const { id, contractGid } of waiting) {
+    await attachSavedCard(db, graphql, id, contractGid!, customerGid);
+  }
+}
 
 /**
  * Updating a card recovers a failed one: every subscription of the customer with a failed payment
@@ -1251,7 +1405,7 @@ export async function resumeAfterCardUpdate(
   db: Db,
   shop: string,
   customerGid: string,
-  webhookId: string,
+  now = new Date(),
 ): Promise<Job[]> {
   const failing = await db.subscription.findMany({
     where: {
@@ -1266,8 +1420,11 @@ export async function resumeAfterCardUpdate(
     },
     select: { id: true },
   });
-  // The webhook's ID is the job's, so the same delivery twice is one try.
-  return failing.map(({ id }) => resumeJob(shop, id, webhookId, false, true));
+  // The window is in the job's ID, so one save that fires both create and update is one try. So is a second
+  // card saved inside it, and that customer still has the portal's button. The same delivery twice stops at its
+  // own job, which holds the webhook's ID.
+  const window = Math.floor(now.getTime() / CARD_SAVE_WINDOW_MS);
+  return failing.map(({ id }) => resumeJob(shop, id, `saved-${window}`, false, true));
 }
 
 export const disputeJob = (shop: string, orderGid: string, webhookId: string): Job => ({

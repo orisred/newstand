@@ -27,6 +27,7 @@ import {
   action as portalAction,
   loader as portalLoader,
 } from "../app/routes/api.portal";
+import { limited, LINK_PRESSES_PER_HOUR, PORTAL_LIMITS } from "../app/rate-limit.server";
 import {
   action as linkAction,
   loader as linkLoader,
@@ -604,18 +605,79 @@ describe("confirming an address", () => {
   });
 });
 
+describe("rate limits", () => {
+  it("stops repeated card emails and retries, per customer, and never stops a cancel", async () => {
+    const s = await setup();
+    const sub = await subscribe(s);
+    const customer = sub.customerGid;
+    const shopDomain = s.domain;
+    await env.DB.prepare(`DELETE FROM "RateLimit"`).run();
+    for (let press = 0; press < PORTAL_LIMITS.resume; press++) {
+      const { status } = await callPortal(shopDomain, customer, { subscriptionId: sub.id, intent: "resume" });
+      expect(status).toBe(200);
+    }
+    const stopped = await callPortal(shopDomain, customer, { subscriptionId: sub.id, intent: "resume" });
+    expect(stopped.status).toBe(429);
+    expect(stopped.json.error).toBe("rate_limited");
+    expect(stopped.sent).toEqual([]);
+
+    // Another customer is untouched.
+    const other = await subscribe(s);
+    const fine = await callPortal(shopDomain, other.customerGid, { subscriptionId: other.id, intent: "resume" });
+    expect(fine.status).toBe(200);
+
+    // What a customer is owed has no limit: a cancel goes through however many there have been.
+    for (let i = 0; i < 40; i++) {
+      await limited(env.DB, customer, "cancel");
+    }
+    expect(PORTAL_LIMITS).not.toHaveProperty("cancel");
+    expect(await limited(env.DB, customer, "cancel")).toBe(false);
+  });
+
+  it("keeps no customer ID or address in the table, and a window ends by itself", async () => {
+    await env.DB.prepare(`DELETE FROM "RateLimit"`).run();
+    const at = new Date("2027-01-01T00:00:00Z");
+    const customer = "gid://shopify/Customer/4242";
+    for (let i = 0; i < PORTAL_LIMITS.card; i++) {
+      expect(await limited(env.DB, customer, "card", at)).toBe(false);
+    }
+    expect(await limited(env.DB, customer, "card", at)).toBe(true);
+    expect(await limited(env.DB, customer, "address", at)).toBe(false); // each action counts on its own
+    expect(await limited(env.DB, customer, "card", new Date(at.getTime() + 61 * 60 * 1000))).toBe(false);
+    const { results } = await env.DB.prepare(`SELECT "key" FROM "RateLimit"`).all<{ key: string }>();
+    expect(results.every(({ key }) => /^[0-9a-f]{64}$/.test(key))).toBe(true);
+  });
+});
+
 describe("the email link page", () => {
   const callLoader = async (token: string) =>
     linkLoader({
       params: { token },
       context: { cloudflare: { env } },
     } as unknown as LoaderFunctionArgs);
-  const callAction = async (token: string) =>
+  const callAction = async (token: string, ip = "198.51.100.1") =>
     linkAction({
       params: { token },
       context: { cloudflare: { env } },
-      request: new Request("https://app.example.com/l/x", { method: "POST" }),
+      request: new Request("https://app.example.com/l/x", {
+        method: "POST",
+        headers: { "CF-Connecting-IP": ip },
+      }),
     } as unknown as ActionFunctionArgs);
+
+  it("a forwarded link pressed over and over is stopped from where it's pressed, and the customer can still confirm", async () => {
+    const s = await setup();
+    const { sub, rel, rowId } = await preorder(s);
+    const link = await signLinkToken(env, { k: "address", s: sub.id, r: rel.id });
+    await env.DB.prepare(`DELETE FROM "RateLimit"`).run();
+    for (let press = 0; press < LINK_PRESSES_PER_HOUR; press++) {
+      expect(await callAction(link, "203.0.113.9")).toEqual({ done: true });
+    }
+    expect(await callAction(link, "203.0.113.9")).toEqual({ done: false, limited: true });
+    // The customer, somewhere else, isn't locked out by whoever has the forwarded link.
+    expect(await callAction(link, "198.51.100.7")).toEqual({ done: true });
+    expect((await db().emailSend.findUniqueOrThrow({ where: { id: rowId } })).addressConfirmedAt).not.toBeNull();
+  });
 
   async function preorder(s: Setup) {
     const sub = await subscribe(s);
@@ -808,11 +870,20 @@ describe("changing the address", () => {
         where: { subscriptionId: sub.id, type: "portal.address_changed" },
       }),
     ).toBe(0);
-    const cancelled = await subscribe(s, { status: "CANCELLED" });
+    const finished = await subscribe(s, { status: "CANCELLED", releasesRemaining: 0 });
     await expect(
-      changeAddress(db(), env.DB, fake.graphql, await own(s, cancelled), good),
+      changeAddress(db(), env.DB, fake.graphql, await own(s, finished), good),
     ).rejects.toThrow("cancelled");
     expect(fake.calls).toEqual([]);
+  });
+
+  it("a cancelled subscriber with paid releases left can change it, because those still ship", async () => {
+    const s = await setup();
+    const sub = await subscribe(s, { status: "CANCELLED", releasesRemaining: 1 });
+    const fake = shopify();
+    await changeAddress(db(), env.DB, fake.graphql, await own(s, sub), good);
+    expect(fake.calls.length).toBeGreaterThan(0);
+    expect((await db().subscription.findUniqueOrThrow({ where: { id: sub.id } })).status).toBe("CANCELLED");
   });
 
   it("does not confirm when Shopify refuses the address", async () => {
@@ -894,7 +965,6 @@ describe("the card", () => {
       db(),
       s.domain,
       failing.customerGid,
-      "hook-1",
     );
     expect(jobs.map((j) => j.data?.subscriptionId).sort()).toEqual(
       [failing.id, retrying.id].sort(),

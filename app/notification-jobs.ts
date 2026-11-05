@@ -12,6 +12,13 @@ export const PAUSED_EVENT = "subscription.paused";
 export const CANCELLED_EVENT = "subscription.cancelled";
 export const LAST_RELEASE_EVENT = "subscription.last_release_shipped";
 
+/**
+ * Whether a price rise's notice went early enough for a charge at `on`. The rise is saved 30 days ahead and
+ * its notice goes on the next hourly run, so a day's slack allows for that and nothing more.
+ */
+export const noticeGiven = (sentAt: Date | null | undefined, on: Date) =>
+  Boolean(sentAt) && sentAt!.getTime() <= on.getTime() - 29 * 24 * 60 * 60 * 1000;
+
 /** `key` is the hour for the tick's job, so a DEAD one never blocks the next; anything else for an immediate one. */
 export const emailRunJob = (
   shop: string,

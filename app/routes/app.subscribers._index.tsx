@@ -77,7 +77,7 @@ export default function Subscribers() {
         <s-banner tone="critical" heading={`${counts.noCard} imported with no card`}>
           <s-paragraph>
             Their contracts have no card, so their next charge will fail, retry and then pause. Ask
-            them to save a card: it&apos;s picked up just before the charge.
+            them to save a card: it goes on the contract as soon as they do.
           </s-paragraph>
         </s-banner>
       )}

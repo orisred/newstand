@@ -1,4 +1,5 @@
 import type { createDb } from "./db.server";
+import { CARD_UPDATED_JOB } from "./billing.server";
 import { logEvent } from "./logger.server";
 
 type Db = ReturnType<typeof createDb>;
@@ -41,10 +42,12 @@ export async function recordDataRequest(
       giftMessage: true,
       createdAt: true,
       noCardSince: true,
+      signupCents: true,
       plan: { select: { displayName: true } },
       billingAttempts: {
-        select: { attempt: true, result: true, errorCode: true, orderGid: true, createdAt: true },
+        select: { attempt: true, result: true, errorCode: true, orderGid: true, amountCents: true, createdAt: true },
       },
+      events: { select: { type: true, createdAt: true } },
       // What was sent, not what it said: nothing personal is kept.
       emailSends: { select: { kind: true, status: true, sentAt: true } },
       deliveries: {
@@ -62,6 +65,10 @@ export async function recordDataRequest(
     where: { shopId: shop.id, customerGid },
     select: { state: true, category: true, flags: true, facts: true, contractGid: true, createdAt: true },
   });
+  const tag = await db.memberTag.findUnique({
+    where: { id: `${shop.id}:${customerGid}` },
+    select: { tag: true },
+  });
   await rawDb
     .prepare(
       `INSERT INTO "Event" ("id", "shopId", "type", "payload")
@@ -71,7 +78,7 @@ export async function recordDataRequest(
       `${DATA_REQUEST_EVENT}:${shop.id}:${requestId}`,
       shop.id,
       DATA_REQUEST_EVENT,
-      JSON.stringify({ requestId, customerGid, subscriptions, importRows }),
+      JSON.stringify({ requestId, customerGid, memberTag: tag?.tag ?? null, subscriptions, importRows }),
     )
     .run();
   logEvent("info", "gdpr.data_request", {
@@ -79,6 +86,23 @@ export async function recordDataRequest(
     requestId,
     subscriptions: subscriptions.length,
   });
+}
+
+/** The file the merchant hands over to the customer. Null for another shop's request, or one handed over. */
+export async function dataRequestFile(db: Db, shopId: string, eventId: string) {
+  const request = await db.event.findFirst({
+    where: { id: eventId, shopId, type: DATA_REQUEST_EVENT },
+    select: { payload: true },
+  });
+  return request ? JSON.stringify(request.payload, null, 2) : null;
+}
+
+/** Handed over, so the copy here goes: it holds a gift message, and nothing else needs it. */
+export async function dataRequestHandedOver(db: Db, shopId: string, eventId: string) {
+  const { count } = await db.event.deleteMany({
+    where: { id: eventId, shopId, type: DATA_REQUEST_EVENT },
+  });
+  return count === 1;
 }
 
 /**
@@ -119,6 +143,10 @@ export async function redactCustomer(
       .bind(shop.id, customerGid),
     rawDb.prepare(`DELETE FROM "EmailSend" WHERE "subscriptionId" IN (${held})`).bind(shop.id, customerGid),
     rawDb.prepare(`DELETE FROM "MemberTag" WHERE "shopId" = ?1 AND "customerGid" = ?2`).bind(shop.id, customerGid),
+    // This job's key holds the customer's ID. By range, because D1 refuses a LIKE pattern this long.
+    rawDb
+      .prepare(`DELETE FROM "JobRun" WHERE "key" >= ?1 AND "key" < ?2`)
+      .bind(`${CARD_UPDATED_JOB}:${customerGid}:`, `${CARD_UPDATED_JOB}:${customerGid};`),
     rawDb
       .prepare(
         `UPDATE "Delivery" SET "addressConfirmedAt" = NULL, "orderError" = NULL,

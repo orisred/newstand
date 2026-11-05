@@ -433,6 +433,22 @@ describe("who is due each email", () => {
   });
 });
 
+describe("a per-release charge's notice", () => {
+  it("still goes to someone who only becomes due long after the pre-order opened, because the charge is still coming", async () => {
+    const s = await setupShop({}, { billingMode: "PER_RELEASE", releasesPerTerm: 1, termMonths: null, priceCents: 1500 });
+    await release(s, "PREORDER", { preorderOpensAt: ago(30) });
+    // Paused when it opened, so nothing was queued, and just recovered.
+    const sub = await subscribe(s, { releasesRemaining: 0, termEndsAt: null, createdAt: ago(100) });
+    const m = mailer();
+    await runAll(s, m, shopify({ [sub.customerGid]: "x@e.test" }).graphql);
+    const queued = await rows(s.shop.id, "upcomingCharge");
+    expect(queued).toHaveLength(1);
+    expect(queued[0].status).toBe("SENT");
+    // The pre-order announcement itself is old news by now.
+    expect(await rows(s.shop.id, "preorderAnnounced")).toHaveLength(0);
+  });
+});
+
 describe("the amount a charge email states", () => {
   it("includes the contract's delivery price, so $15 plus $8 shipping reads $23, and $0 shipping adds nothing", async () => {
     const s = await setupShop({}, { priceCents: 1500 });
@@ -466,6 +482,44 @@ describe("the amount a charge email states", () => {
     expect(texts).toContain("goes from $23.00 to $28.00, each plus any tax");
   });
 
+  it("states what the charge will take when the merchant kept the old price, whichever way the price moved", async () => {
+    for (const newPriceCents of [1000, 2000]) {
+      const s = await setupShop({}, { priceCents: newPriceCents });
+      const sub = await subscribe(s, { lockedPriceCents: 1500, termEndsAt: ahead(10), createdAt: ago(100) });
+      await db().priceChange.create({
+        data: { planId: s.plan.id, newPriceCents, policy: "KEEP_OLD_PRICE", effectiveAt: ago(5), createdAt: ago(5) },
+      });
+      const m = mailer();
+      await runAll(s, m, shopify({ [sub.customerGid]: "x@e.test" }).graphql);
+      expect(m.sent[0].text).toContain("we'll charge $15.00 plus any tax");
+    }
+  });
+
+  it("states the old price if the rise's notice wasn't sent in time, because that is what the charge will take", async () => {
+    const s = await setupShop({}, { priceCents: 1500 });
+    const unnoticed = await subscribe(s, { lockedPriceCents: 1500, termEndsAt: ahead(10), createdAt: ago(100) });
+    const noticed = await subscribe(s, { lockedPriceCents: 1500, termEndsAt: ahead(10), createdAt: ago(100) });
+    const pc = await db().priceChange.create({
+      data: { planId: s.plan.id, newPriceCents: 2000, policy: "APPLY_AT_RENEWAL", effectiveAt: ago(1), createdAt: ago(31) },
+    });
+    await db().emailSend.create({
+      data: {
+        id: `priceChange:${noticed.id}:${pc.id}`,
+        shopId: s.shop.id,
+        subscriptionId: noticed.id,
+        kind: "priceChange",
+        subject: pc.id,
+        status: "SENT",
+        sentAt: ago(31),
+      },
+    });
+    const m = mailer();
+    await runAll(s, m, shopify({ [unnoticed.customerGid]: "u@e.test", [noticed.customerGid]: "n@e.test" }).graphql);
+    const text = (to: string) => m.sent.find((message) => message.to === to)?.text ?? "";
+    expect(text("u@e.test")).toContain("we'll charge $15.00 plus any tax");
+    expect(text("n@e.test")).toContain("we'll charge $20.00 plus any tax");
+  });
+
   it("states no amount for a contract that's gone", async () => {
     const s = await setupShop();
     const sub = await subscribe(s, { termEndsAt: ahead(10) });
@@ -482,6 +536,18 @@ describe("the price-change notice", () => {
       data: { planId: s.plan.id, newPriceCents: 5000, policy: "APPLY_AT_RENEWAL", effectiveAt: ahead(30), createdAt: ago(0.2), ...data },
     });
   }
+
+  it("a later slice of a chain doesn't mark a rise saved after its rows were queued, so its notice still goes", async () => {
+    const s = await setupShop();
+    const old = await subscribe(s, { lockedPriceCents: 4000, createdAt: ago(5) });
+    const pc = await change(s);
+    const m = mailer();
+    // A slice that didn't queue, as every slice after the first in a chain.
+    await runAll(s, m, shopify({ [old.customerGid]: "o@e.test" }).graphql, {}, emailRunJob(s.domain, `chain${++n}`, { queued: true }));
+    expect((await db().priceChange.findUniqueOrThrow({ where: { id: pc.id } })).noticeSentAt).toBeNull();
+    await runAll(s, m, shopify({ [old.customerGid]: "o@e.test" }).graphql);
+    expect(m.sent.map((message) => message.subject)).toContain("Price change for Yearly subscription");
+  });
 
   it("reaches subscribers who signed up at the old price, is sent even with every email off, and is marked sent", async () => {
     const s = await setupShop({ emailsEnabled: Object.fromEntries(EMAIL_KEYS.map((key) => [key, false])) });

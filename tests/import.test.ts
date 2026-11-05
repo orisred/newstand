@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- a fake of Shopify's loosely typed responses */
 import { applyD1Migrations, env } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
-import { findRenewals, renewalDue, renewIfDue, settleAttempt } from "../app/billing.server";
+import { attachSavedCards, findRenewals, renewalDue, renewIfDue, settleAttempt } from "../app/billing.server";
 import { revenueReport, subscriberCounts, totalsBy } from "../app/dashboard.server";
 import { createDb } from "../app/db.server";
 import { recordDataRequest, redactCustomer, redactShop } from "../app/gdpr.server";
@@ -1644,6 +1644,25 @@ describe("charging an imported subscriber", () => {
   }
   const reread = (id: string) => db().subscription.findUniqueOrThrow({ where: { id } });
 
+  it("a card saved with nothing to retry goes on the contract then, so the no-card flag tells the truth, and charges nothing", async () => {
+    const { t, subscription, state, graphql } = await due({ noCardSince: NOW });
+    // Nothing saved yet: the flag stays.
+    await attachSavedCards(db(), async () => graphql, t.domain, subscription.customerGid);
+    expect((await reread(subscription.id)).noCardSince).not.toBeNull();
+    expect(state.draftCard).toBeNull();
+
+    state.saved = "gid://shopify/CustomerPaymentMethod/new";
+    await attachSavedCards(db(), async () => graphql, t.domain, subscription.customerGid);
+    expect(state.draftCard).toBe("gid://shopify/CustomerPaymentMethod/new");
+    expect((await reread(subscription.id)).noCardSince).toBeNull();
+    expect(state.charges).toBe(0);
+
+    // Someone else's save, or one with no such subscriber, doesn't even ask Shopify.
+    let asked = 0;
+    await attachSavedCards(db(), async () => { asked++; return graphql; }, t.domain, "gid://shopify/Customer/nobody");
+    expect(asked).toBe(0);
+  });
+
   it("no card and none saved: the charge still goes out, to fail and pause by the usual rule", async () => {
     const { subscription, state, graphql } = await due({ noCardSince: NOW });
     await renewIfDue(db(), env.DB, graphql, subscription.id, NOW);
@@ -1710,7 +1729,18 @@ describe("charging an imported subscriber", () => {
 
   it("a rise saved after they came in applies, with its notice, like anyone's", async () => {
     const { t, subscription, state, graphql } = await due({ createdAt: new Date(NOW.getTime() - 60 * DAY) });
-    await priceChange(t.plan.id, new Date(NOW.getTime() - 40 * DAY), new Date(NOW.getTime() - 10 * DAY));
+    const change = await priceChange(t.plan.id, new Date(NOW.getTime() - 40 * DAY), new Date(NOW.getTime() - 10 * DAY));
+    await db().emailSend.create({
+      data: {
+        id: `priceChange:${subscription.id}:${change.id}`,
+        shopId: t.shop.id,
+        subscriptionId: subscription.id,
+        kind: "priceChange",
+        subject: change.id,
+        status: "SENT",
+        sentAt: new Date(NOW.getTime() - 39 * DAY),
+      },
+    });
     await renewIfDue(db(), env.DB, graphql, subscription.id, NOW);
     expect(state.priced).toBe("50.00");
     expect((await reread(subscription.id)).lockedPriceCents).toBe(5000);

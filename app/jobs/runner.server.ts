@@ -1,5 +1,6 @@
 import { createDb } from "../db.server";
 import { describeError, logEvent } from "../logger.server";
+import { flagDeadSignup } from "../subscriptions.server";
 import {
   claimJob,
   completeJobStatement,
@@ -186,6 +187,7 @@ export async function consumeDeadJobs(batch: MessageBatch<unknown>, env: Env) {
         shop: job?.shop,
         body: JSON.stringify(message.body),
       });
+      await flagDeadSignup(env.DB, job);
       message.ack();
     } catch (error) {
       logEvent("error", "job.dead_not_recorded", { ...fields, ...describeError(error) });

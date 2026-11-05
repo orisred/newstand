@@ -4,6 +4,7 @@ import type { Job } from "./jobs/runner.server";
 import { describeError, logEvent } from "./logger.server";
 import { memberTagJob } from "./notification-jobs";
 import type { Graphql } from "./plan-sync.server";
+import { IMPORT_HOLD } from "./subscriptions.server";
 
 type Db = ReturnType<typeof createDb>;
 
@@ -14,9 +15,15 @@ const CUSTOMERS_PER_SLICE = 25;
  * payment) one keeps it while it still has paid releases whose orders haven't been created, and loses it
  * when the last of them is. A chargeback or an ended subscription never does.
  * A gift never renews, so it stays active in name only: it loses the tag with its last paid release too.
+ * A plan without auto-renew has nothing to renew into either, so it keeps the tag until its term is up, and
+ * past that only while a paid release is still owed (N, 2026-11-05). With no term, its last release ends it.
+ * An import hold is the merchant's doing and they've paid for the term, so it keeps the tag while that runs,
+ * even with nothing left to ship (N, 2026-11-05).
  */
 const QUALIFIES = `s."status" <> 'ENDED' AND NOT ${CHARGEBACK_HOLD}
-  AND (s."releasesRemaining" > 0 OR (s."status" = 'ACTIVE' AND s."source" <> 'GIFT'))`;
+  AND (s."releasesRemaining" > 0 OR (s."status" = 'ACTIVE' AND s."source" <> 'GIFT'
+    AND (p."autoRenew" = 1 OR julianday(s."termEndsAt") > julianday(?5)))
+  OR (s."pausedReason" = '${IMPORT_HOLD}' AND julianday(s."termEndsAt") > julianday(?5)))`;
 
 const TAGS_ADD = `#graphql
   mutation MemberTagAdd($id: ID!, $tags: [String!]!) {
@@ -54,13 +61,14 @@ export async function runMemberTagSlice(
       `SELECT s."customerGid", m."tag" AS "current",
          CASE WHEN MAX(CASE WHEN ${QUALIFIES} THEN 1 ELSE 0 END) = 1 THEN ?2 END AS "wanted"
        FROM "Subscription" s
+       JOIN "Plan" p ON p."id" = s."planId"
        LEFT JOIN "MemberTag" m ON m."id" = s."shopId" || ':' || s."customerGid"
        WHERE s."shopId" = ?1 AND s."customerGid" <> 'redacted' AND s."customerGid" > ?3
        GROUP BY s."customerGid"
        HAVING "wanted" IS NOT m."tag"
        ORDER BY s."customerGid" LIMIT ?4`,
     )
-    .bind(shop.id, shop.memberDiscountTag, after, CUSTOMERS_PER_SLICE)
+    .bind(shop.id, shop.memberDiscountTag, after, CUSTOMERS_PER_SLICE, clock().toISOString())
     .all<{ customerGid: string; current: string | null; wanted: string | null }>();
 
   const graphql = results.length ? await graphqlFor() : null;
