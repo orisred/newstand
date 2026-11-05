@@ -14,6 +14,13 @@ import {
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { resumeJob } from "../billing.server";
+import {
+  customerLabel,
+  customerNames,
+  EMAIL_KIND_LABELS,
+  resendJob,
+  resolveUnsureEmail,
+} from "../dashboard.server";
 import { createDb } from "../db.server";
 import { enqueueJobs } from "../jobs/runner.server";
 import { graphqlOf } from "../plan-sync.server";
@@ -26,12 +33,10 @@ import {
 import { formatZoned, zonedFields, zonedToUtc } from "../release-dates";
 import {
   createRelease,
-  listPaymentProblems,
-  listReleases,
-  listRunProgress,
   moveRelease,
   parseQuantity,
   parseTitle,
+  releasesPageData,
   scheduleRelease,
   setReleaseProduct,
   TITLE_MAX_LENGTH,
@@ -62,9 +67,10 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const shop = await getOrCreateShop(db, session.shop);
   const timezone = shop.timezone ?? (await refreshTimezone(db, admin, shop.id));
   const before = Number(new URL(request.url).searchParams.get("before"));
-  const { releases: rows, nextBefore } = await listReleases(
+  const { releases: rows, nextBefore, runs, problems, mixed, unsure, stock } = await releasesPageData(
     db,
-    shop.id,
+    context.cloudflare.env.DB,
+    shop,
     Number.isInteger(before) && before > 0 ? before : undefined,
   );
   // Dates are text by here, on the store's clock, so the browser never works them out.
@@ -78,20 +84,19 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       release.preorderOpensAt && zonedFields(release.preorderOpensAt, timezone),
     cutoffFields: release.cutoffAt && zonedFields(release.cutoffAt, timezone),
   }));
-  const [runs, problems, mixed] = await Promise.all([
-    listRunProgress(db, shop.orderTiming, rows),
-    listPaymentProblems(db, shop.id),
-    db.event.findMany({
-      where: {
-        shopId: shop.id,
-        type: { in: [MIXED_PLANS_EVENT, GIFT_INVALID_EVENT] },
-      },
-      orderBy: { createdAt: "desc" },
-      take: 10,
-      select: { id: true, type: true, payload: true },
-    }),
-  ]);
+  const names = unsure.rows.length
+    ? await customerNames(graphqlOf(admin), unsure.rows.map((row) => row.customerGid))
+    : new Map<string, string>();
   return {
+    unsure: unsure.rows.map((row) => ({
+      id: row.id,
+      email: EMAIL_KIND_LABELS[row.kind] ?? row.kind,
+      subscriptionId: row.subscriptionId,
+      customer: customerLabel(names, row.customerGid),
+      release: row.title ? `${row.number}. ${row.title}` : null,
+    })),
+    moreUnsure: unsure.more,
+    stock,
     word: shop.releaseWordSingular,
     plural: shop.releaseWordPlural,
     releases,
@@ -191,6 +196,25 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     return {
       ok: count === 1,
       message: count === 1 ? "Marked as handled." : "That sign-up was already handled.",
+    } satisfies ActionData;
+  }
+
+  if (intent === "emailResend" || intent === "emailLeave") {
+    const resend = intent === "emailResend";
+    const done = await resolveUnsureEmail(
+      env.DB,
+      shop.id,
+      String(form.get("emailId")),
+      resend ? "resend" : "leave",
+    );
+    if (done && resend) await enqueueJobs(env, [resendJob(session.shop)]);
+    return {
+      ok: done,
+      message: !done
+        ? "That email was already dealt with."
+        : resend
+          ? "It will be sent again in a moment."
+          : "Left as it is. It won't be sent.",
     } satisfies ActionData;
   }
 
@@ -329,6 +353,9 @@ export default function Releases() {
     mixed,
     paymentProblems,
     morePaymentProblems,
+    unsure,
+    moreUnsure,
+    stock,
   } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<ActionData>();
   const { revalidate } = useRevalidator();
@@ -466,6 +493,64 @@ export default function Releases() {
           )
         );
       })}
+      {unsure.length > 0 && (
+        <s-banner tone="warning" heading="An email may not have been sent">
+          <s-stack gap="base">
+            <s-paragraph>
+              The app stopped while sending these, so it can&apos;t tell whether they arrived. Sending
+              again could mean the subscriber gets the same email twice, if the first one did arrive.
+              Leaving it could mean they never get it.
+            </s-paragraph>
+            {unsure.map((email) => (
+              <s-stack key={email.id} direction="inline" gap="base" alignItems="center">
+                <s-text>
+                  {email.email}
+                  {email.release ? ` for ${email.release}` : ""} to{" "}
+                  <s-link href={`/app/subscribers/${email.subscriptionId}`}>{email.customer}</s-link>
+                </s-text>
+                <s-button
+                  {...(busy ? { disabled: true } : {})}
+                  onClick={() =>
+                    fetcher.submit({ intent: "emailResend", emailId: email.id }, { method: "POST" })
+                  }
+                >
+                  Send again
+                </s-button>
+                <s-button
+                  variant="tertiary"
+                  {...(busy ? { disabled: true } : {})}
+                  onClick={() =>
+                    fetcher.submit({ intent: "emailLeave", emailId: email.id }, { method: "POST" })
+                  }
+                >
+                  Leave it
+                </s-button>
+              </s-stack>
+            ))}
+            {moreUnsure && (
+              <s-text color="subdued">More are waiting. They appear as these are dealt with.</s-text>
+            )}
+          </s-stack>
+        </s-banner>
+      )}
+      {stock.map((plan) => (
+        <s-banner
+          key={plan.id}
+          tone={plan.stockLevel! <= 0 ? "critical" : "warning"}
+          heading={
+            plan.stockLevel! <= 0
+              ? `Sign-ups are blocked for ${plan.name}: out of stock`
+              : `${plan.name} is running low on stock`
+          }
+        >
+          <s-paragraph>
+            {plan.productTitle ?? "The plan's product"} has {Math.max(plan.stockLevel!, 0)} in
+            stock and doesn&apos;t sell past zero, so customers {plan.stockLevel! <= 0 ? "can't" : "soon won't be able to"}{" "}
+            subscribe. Add stock, or let it continue selling when out of stock, in Shopify.
+            Checked hourly.
+          </s-paragraph>
+        </s-banner>
+      ))}
       {paymentProblems.length > 0 && (
         <s-section heading="Payment problems">
           <s-stack gap="base">
@@ -655,6 +740,14 @@ export default function Releases() {
                             onClick={() => exportRun(release)}
                           >
                             Export CSV
+                          </s-button>
+                        )}
+                        {release.status !== "UNANNOUNCED" && (
+                          <s-button
+                            variant="tertiary"
+                            onClick={() => navigate(`/app/confirmations/${release.id}`)}
+                          >
+                            Address confirmations
                           </s-button>
                         )}
                       </s-stack>

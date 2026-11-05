@@ -9,8 +9,10 @@ import {
   type ReleaseStatus,
 } from "./release-actions";
 import { emailRunJob } from "./notification-jobs";
+import { listStockWarnings, listUnsureEmails } from "./dashboard.server";
+import { GIFT_INVALID_EVENT } from "./gifts.server";
 import { createDueDeliveries } from "./release-runs.server";
-import { orderStepReached, releaseRunJob } from "./subscriptions.server";
+import { MIXED_PLANS_EVENT, orderStepReached, releaseRunJob } from "./subscriptions.server";
 
 type Db = ReturnType<typeof createDb>;
 
@@ -180,6 +182,32 @@ export async function listPaymentProblems(db: Db, shopId: string) {
     },
   });
   return { rows: rows.slice(0, PAYMENT_PROBLEMS), more: rows.length > PAYMENT_PROBLEMS };
+}
+
+/**
+ * Everything the releases screen reads. Kept to a handful of small queries, all but the first two at
+ * once, because D1 is single-region and Built for Shopify checks admin load speed.
+ */
+export async function releasesPageData(
+  db: Db,
+  rawDb: D1Database,
+  shop: { id: string; orderTiming: OrderTiming },
+  before?: number,
+) {
+  const { releases, nextBefore } = await listReleases(db, shop.id, before);
+  const [runs, problems, mixed, unsure, stock] = await Promise.all([
+    listRunProgress(db, shop.orderTiming, releases),
+    listPaymentProblems(db, shop.id),
+    db.event.findMany({
+      where: { shopId: shop.id, type: { in: [MIXED_PLANS_EVENT, GIFT_INVALID_EVENT] } },
+      orderBy: { createdAt: "desc" },
+      take: 10,
+      select: { id: true, type: true, payload: true },
+    }),
+    listUnsureEmails(rawDb, shop.id),
+    listStockWarnings(db, shop.id),
+  ]);
+  return { releases, nextBefore, runs, problems, mixed, unsure, stock };
 }
 
 const VARIANT_GID = /^gid:\/\/shopify\/ProductVariant\/\d+$/;

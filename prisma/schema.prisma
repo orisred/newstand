@@ -69,6 +69,9 @@ model Release {
   quantity     Int?          // optional cap; null = no cap
   status       ReleaseStatus @default(UNANNOUNCED)
   runLeaseUntil DateTime?    // set while a run's slice works or sleeps, so one chain of jobs runs per release
+  productCostCents  Int?     // what one copy costs; null = not recorded
+  shippingCostCents Int?     // shipping, per order
+  handlingCostCents Int?     // handling, per order
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
   deliveries   Delivery[]
@@ -109,6 +112,8 @@ model Plan {
   syncedAt         DateTime?
   syncRevision     Int            @default(0) // bumped by each change or retry; part of the sync job's ID
   syncLeaseUntil   DateTime?      // set while a sync runs, so two never run at once
+  stockLevel       Int?           // lowest stock among variants that stop selling at 0; null = nothing can stop sign-ups
+  stockCheckedAt   DateTime?
   billingMode      BillingMode    @default(PREPAID_BUNDLE)
   releasesPerTerm  Int            @default(1)
   termMonths       Int?           // e.g. 12 for a yearly bundle; null for per-release
@@ -168,6 +173,7 @@ model Subscription {
   giftMessage        String?
   pausedReason       String?            // FAILED_PAYMENT or CHARGEBACK
   paymentProblemSince DateTime?         // from the first failed try or chargeback until it's resolved. See "Reach-back" in DECISIONS.md
+  signupCents        Int?               // the sign-up payment order's subtotal; null until read. See "Dashboard" in DECISIONS.md
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
   deliveries         Delivery[]
@@ -222,6 +228,7 @@ model BillingAttempt {
   attempt          Int
   shopifyAttemptGid String?      @unique
   orderGid         String?       // the billing order, once it has succeeded
+  amountCents      Int?          // that order's subtotal; null until read
   result           BillingResult @default(PENDING)
   errorCode        String?
   nextRetryAt      DateTime?
@@ -262,6 +269,7 @@ model Event {
   createdAt       DateTime      @default(now())
 
   @@index([shopId, type, createdAt])
+  @@index([subscriptionId])
 }
 
 enum EmailStatus {
