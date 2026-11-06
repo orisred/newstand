@@ -23,6 +23,7 @@ function form(fields: Record<string, string>) {
 const valid = {
   releaseWordSingular: "drop",
   releaseWordPlural: "drops",
+  vocabulary: "MEMBERSHIPS",
   allowedCountries: "us, ca",
   orderTiming: "PREORDER_OPENS",
   email_welcome: "on",
@@ -74,6 +75,7 @@ describe("parseSettings", () => {
       values: {
         releaseWordSingular: "drop",
         releaseWordPlural: "drops",
+        vocabulary: "MEMBERSHIPS",
         allowedCountries: ["US", "CA"],
         orderTiming: "PREORDER_OPENS",
         emailsEnabled: {
@@ -94,6 +96,8 @@ describe("parseSettings", () => {
   it("rejects bad words, countries and timing", () => {
     const cases: [Record<string, string>, string][] = [
       [{ ...valid, releaseWordSingular: "  " }, "releaseWordSingular"],
+      [{ ...valid, vocabulary: "TIERS" }, "vocabulary"],
+      [{ ...valid, vocabulary: "" }, "vocabulary"],
       [{ ...valid, releaseWordPlural: "x".repeat(31) }, "releaseWordPlural"],
       [{ ...valid, releaseWordSingular: "<b>" }, "releaseWordSingular"],
       [{ ...valid, allowedCountries: "" }, "allowedCountries"],

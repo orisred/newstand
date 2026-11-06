@@ -27,6 +27,10 @@ const PRICE_NOTICE_DAYS = 30;
 export type PlanInput = {
   name: string;
   displayName: string;
+  /** What the plan includes, such as a tier's perks. Customers see it under the plan's name. */
+  description?: string | null;
+  /** The plan's own customer tag, beside the shop's member tag, so a tier can have perks of its own. */
+  memberTag?: string | null;
   billingMode: BillingMode;
   releasesPerTerm: number;
   termMonths: number | null;
@@ -43,6 +47,8 @@ export type PlanErrors = Partial<
   Record<
     | "name"
     | "displayName"
+    | "description"
+    | "memberTag"
     | "billingMode"
     | "releasesPerTerm"
     | "termMonths"
@@ -84,6 +90,33 @@ export function parsePriceCents(value: string) {
   return total > 0 && total <= MAX_PRICE_CENTS ? total : null;
 }
 
+export const DESCRIPTION_MAX_LENGTH = 500;
+export const MEMBER_TAG_MAX_LENGTH = 40;
+
+/** Plain text that keeps its line breaks. Empty is null. */
+function parseDescription(form: FormData) {
+  const raw = form.get("description");
+  const value = (typeof raw === "string" ? raw : "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.trim().replace(/[ \t]+/g, " "))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (!value) return { value: null };
+  return value.length <= DESCRIPTION_MAX_LENGTH && !/[<>]|(?!\n)\p{C}/u.test(value)
+    ? { value }
+    : { error: `Use up to ${DESCRIPTION_MAX_LENGTH} characters, with no < or > characters.` };
+}
+
+/** A Shopify tag holds no comma: Shopify splits tags on them. Empty is null. */
+function parseTag(value: string) {
+  if (!value) return { value: null };
+  return value.length <= MEMBER_TAG_MAX_LENGTH && !/[,<>\p{C}]/u.test(value)
+    ? { value }
+    : { error: `Use up to ${MEMBER_TAG_MAX_LENGTH} characters, with no commas or < > characters.` };
+}
+
 function parseLabel(value: string) {
   return value && value.length <= NAME_MAX_LENGTH && !/[<>\p{C}]/u.test(value)
     ? value
@@ -108,6 +141,11 @@ export function parsePlan(
   if (!displayName) {
     errors.displayName = `Enter the name customers see, up to ${NAME_MAX_LENGTH} characters.`;
   }
+
+  const description = parseDescription(form);
+  if (description.error) errors.description = description.error;
+  const memberTag = parseTag(text(form, "memberTag"));
+  if (memberTag.error) errors.memberTag = memberTag.error;
 
   const billingMode =
     existing?.billingMode ?? oneOf(BILLING_MODES, text(form, "billingMode"));
@@ -172,6 +210,8 @@ export function parsePlan(
     values: {
       name: name!,
       displayName: displayName!,
+      description: description.value ?? null,
+      memberTag: memberTag.value ?? null,
       billingMode: billingMode!,
       releasesPerTerm,
       termMonths,
@@ -223,6 +263,8 @@ export function getPlan(db: Db, shopId: string, id: string) {
       autoRenew: true,
       giftable: true,
       productGid: true,
+      description: true,
+      memberTag: true,
     },
   });
 }
@@ -283,6 +325,8 @@ export async function updatePlan(
     data: {
       name: input.name,
       displayName: input.displayName,
+      description: input.description,
+      memberTag: input.memberTag,
       renewalRule: input.renewalRule,
       startRule: input.startRule,
       priceCents: input.priceCents,

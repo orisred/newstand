@@ -1,10 +1,17 @@
-/** What every email needs to know about the shop. The words are the merchant's own: never hard-code "issue". */
+import { termsOf } from "./vocabulary";
+
+/**
+ * What every email needs to know about the shop. The words are the merchant's own: never hard-code "issue"
+ * or "subscription".
+ */
 export type ShopCopy = {
   name: string;
   /** The storefront, such as https://shop.example.com */
   url: string;
   singular: string;
   plural: string;
+  /** "SUBSCRIPTIONS" or "MEMBERSHIPS": see `termsOf`. Missing reads "subscription". */
+  vocabulary?: string | null;
   /** For dates. An IANA name; UTC if the shop has none yet. */
   timezone: string | null;
   /** The shop's business address, for the footer. Not a customer's. */
@@ -107,6 +114,7 @@ type Body = {
 function compose(shop: ShopCopy, data: EmailData): Body {
   const word = shop.singular;
   const words = shop.plural;
+  const t = termsOf(shop.vocabulary);
   const date = (value: Date) => formatDate(value, shop.timezone);
   const cancel = `You can turn off auto-renew or cancel any time from your account. The ${words} you've already paid for still ship.`;
   const manage = (url: string) => ({ label: "Turn off auto-renew or cancel", url });
@@ -116,32 +124,32 @@ function compose(shop: ShopCopy, data: EmailData): Body {
       return {
         subject: `Welcome to ${shop.name}`,
         paragraphs: [
-          `Thanks for subscribing to ${data.plan}.`,
-          `Each ${word} ships on its own order, created when that ${word} starts shipping, so you'll get a separate shipping email from ${shop.name} for every ${word}. The order you just paid for only records your payment: it doesn't ship a ${word}.`,
+          `Thanks for ${t.subscribingTo} ${data.plan}.`,
+          `Each ${word} ships on its own order, created when that ${word} starts shipping, so you'll get a separate shipping email from ${shop.name} for every ${word}. The order you just paid for only records your payment: no ${word} ships on it.`,
           `If your first ${word} is already out, it ships now on its own order.`,
         ],
       };
     case "giftReceived":
       return {
-        subject: `You've been given a subscription to ${shop.name}`,
+        subject: `You've been given a ${t.noun} to ${shop.name}`,
         paragraphs: [
           `Someone has given you ${data.plan} from ${shop.name}. It's already paid for, so you'll never be charged.`,
           ...(data.message
             ? [`Their message (written by the sender, not by ${shop.name}):`, `“${data.message}”`]
             : []),
-          `Each ${word} ships to you on its own order when it starts shipping, using the delivery address on your subscription. Please check it's right.`,
+          `Each ${word} ships to you on its own order when it starts shipping, using the delivery address on your ${t.noun}. Please check it's right.`,
           `To see or change it, sign in with this email address. We'll send you a code, so you don't need a password.`,
         ],
         button: { label: "Check your delivery address", url: data.portalUrl },
       };
     case "preorderAnnounced": {
-      const lead = `${data.release} is now in pre-order. As a subscriber, you'll get it as soon as it starts shipping.`;
+      const lead = `${data.release} is now in pre-order. As a ${t.member}, you'll get it as soon as it starts shipping.`;
       if (data.paused) {
         return {
           subject: `${data.release} is up for pre-order`,
           paragraphs: [
             lead,
-            `Your subscription is paused because we couldn't charge your card. Update your card to keep receiving your ${words}.`,
+            `Your ${t.noun} is paused because we couldn't charge your card. Update your card to keep receiving your ${words}.`,
           ],
           button: { label: "Update your card", url: data.cardUrl },
         };
@@ -151,7 +159,7 @@ function compose(shop: ShopCopy, data: EmailData): Body {
           subject: `${data.release} is up for pre-order`,
           paragraphs: [
             lead,
-            `We're creating your order now, using the delivery address on your subscription.`,
+            `We're creating your order now, using the delivery address on your ${t.noun}.`,
           ],
         };
       }
@@ -159,7 +167,7 @@ function compose(shop: ShopCopy, data: EmailData): Body {
         subject: `${data.release} is up for pre-order`,
         paragraphs: [
           lead,
-          `We create your order then, using the delivery address on your subscription at that moment. Please check it's right.`,
+          `We create your order then, using the delivery address on your ${t.noun} at that moment. Please check it's right.`,
         ],
         button: {
           label: "Confirm or update your delivery address",
@@ -205,7 +213,7 @@ function compose(shop: ShopCopy, data: EmailData): Body {
           `We tried to charge your card for ${data.plan} and it didn't go through.`,
           data.retryOn
             ? `We'll try again on ${date(data.retryOn)}. To avoid a gap, you can update your card now.`
-            : `Your subscription is paused until your payment goes through. Update your card and we'll pick things up again.`,
+            : `Your ${t.noun} is paused until your payment goes through. Update your card and we'll pick things up again.`,
         ],
         button: { label: "Update your card", url: data.cardUrl },
       };
@@ -215,7 +223,7 @@ function compose(shop: ShopCopy, data: EmailData): Body {
           subject: `Your last gift ${word} is on its way`,
           paragraphs: [
             `${data.release} is the last ${word} in the gift of ${data.plan}, and it's starting to ship now. A gift doesn't renew, and you won't be charged.`,
-            `To keep receiving ${words}, you can subscribe for yourself any time at ${shop.url}. Sign in with this email address to see your address and past ${words}: we'll send you a code, and you don't need a password.`,
+            `To keep receiving ${words}, you can ${t.subscribe} for yourself any time at ${shop.url}. Sign in with this email address to see your address and past ${words}: we'll send you a code, and you don't need a password.`,
           ],
           button: { label: "Sign in to your account", url: data.portalUrl },
         };
@@ -223,8 +231,8 @@ function compose(shop: ShopCopy, data: EmailData): Body {
       return {
         subject: `Your last ${word} is on its way`,
         paragraphs: [
-          `${data.release} is the last ${word} included in ${data.plan}, and it's starting to ship now. Your subscription won't renew.`,
-          `To keep receiving ${words}, you can subscribe again any time at ${shop.url}.`,
+          `${data.release} is the last ${word} included in ${data.plan}, and it's starting to ship now. Your ${t.noun} won't renew.`,
+          `To keep receiving ${words}, you can ${t.subscribe} again any time at ${shop.url}.`,
         ],
       };
     case "priceChange":
@@ -243,7 +251,7 @@ function compose(shop: ShopCopy, data: EmailData): Body {
 export function renderEmail(shop: ShopCopy, data: EmailData): Rendered {
   const { subject, paragraphs, button } = compose(shop, data);
   const footer = [
-    `You're receiving this because you subscribe to ${shop.name}.`,
+    `You're receiving this because you ${termsOf(shop.vocabulary).belongTo} ${shop.name}.`,
     shop.address,
   ].filter((line): line is string => Boolean(line));
 

@@ -174,6 +174,8 @@ export const action = async ({ request, context }: ActionFunctionArgs): Promise<
       issues: String(form.get("issues") ?? ""),
       giftKeys: String(form.get("giftKeys") ?? ""),
       statusKnown: form.get("statusKnown") === "true",
+      orderTag: String(form.get("orderTag") ?? ""),
+      listFrom: String(form.get("listFrom") ?? ""),
     });
     if (!parsed.ok) return { errors: parsed.errors };
     return startRun(db, graphqlOf(admin), shop.id, parsed.settings);
@@ -339,9 +341,19 @@ export default function ImportPage() {
               rows={5}
             />
             <s-text-field
+              name="listFrom"
+              label="The list covers everything from (optional)"
+              details={`YYYY-MM-DD. If subscriptions began before the first ${word} above, the day they began: purchases from then count in full, as nothing shipped to subscribers before that ${word}. Leave empty to start at the first line.`}
+            />
+            <s-text-field
               name="giftKeys"
               label="Line properties that mark a gift (optional)"
               value="Gift recipient email"
+            />
+            <s-text-field
+              name="orderTag"
+              label={`Order tag on subscribers' ${plural} (optional)`}
+              details={`With order lines listed above, an order counts for a listed ${word} only if it has this tag, so a copy someone bought in your shop isn't counted as theirs. Leave empty to count every order.`}
             />
             <s-stack direction="inline" gap="base">
               <s-button

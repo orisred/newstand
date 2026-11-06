@@ -194,7 +194,7 @@ function tagShopify() {
   const graphql = async (query: string, variables: any) => {
     if (state.failing) throw new Error("Admin API returned errors");
     const op = query.includes("tagsAdd") ? "tagsAdd" : "tagsRemove";
-    calls.push({ op, id: variables.id, tag: variables.tags[0] });
+    calls.push({ op, id: variables.id, tag: variables.tags.join(",") });
     return {
       [op]: { userErrors: state.missing.has(variables.id) ? [{ message: "Customer does not exist" }] : [] },
     };
@@ -386,6 +386,56 @@ describe("the member discount tag", () => {
     await tags(s, shopify.graphql);
     await tags(s, shopify.graphql);
     expect(shopify.calls).toHaveLength(1);
+  });
+
+  it("puts a plan's own tag on beside the shop's, in one call, and takes both off when it ends", async () => {
+    const s = await setupShop({ memberTag: "member-insider" });
+    const sub = await subscribe(s);
+    const shopify = tagShopify();
+    await tags(s, shopify.graphql);
+    await tags(s, shopify.graphql);
+    expect(shopify.calls).toEqual([{ op: "tagsAdd", id: sub.customerGid, tag: "active-subscriber,member-insider" }]);
+    expect((await tagged(s))[sub.customerGid]).toBe("active-subscriber,member-insider");
+
+    await db().subscription.update({ where: { id: sub.id }, data: { status: "ENDED" } });
+    await tags(s, shopify.graphql);
+    expect(shopify.calls.at(-1)).toEqual({ op: "tagsRemove", id: sub.customerGid, tag: "active-subscriber,member-insider" });
+    expect((await tagged(s))[sub.customerGid]).toBeNull();
+  });
+
+  it("takes a tier's tag off when that tier stops qualifying, by the same rules, and keeps the rest", async () => {
+    const s = await setupShop({ memberTag: "member-cake-boss" });
+    const insider = await db().plan.create({
+      data: { shopId: s.shop.id, name: "Insider", displayName: "Insider Membership", priceCents: 10500, memberTag: "member-insider" },
+    });
+    const customerGid = "gid://shopify/Customer/901";
+    const boss = await subscribe(s, { customerGid, status: "CANCELLED", releasesRemaining: 1 });
+    await subscribe(s, { customerGid, planId: insider.id });
+    const shopify = tagShopify();
+    await tags(s, shopify.graphql);
+    expect((await tagged(s))[customerGid]).toBe("active-subscriber,member-cake-boss,member-insider");
+
+    // The cancelled tier's last paid release has its order: its tag goes, the shop's stays for the other.
+    await db().subscription.update({ where: { id: boss.id }, data: { releasesRemaining: 0 } });
+    await tags(s, shopify.graphql);
+    expect(shopify.calls.slice(1)).toEqual([{ op: "tagsRemove", id: customerGid, tag: "member-cake-boss" }]);
+    expect((await tagged(s))[customerGid]).toBe("active-subscriber,member-insider");
+  });
+
+  it("gives a plan's tag once when it's the shop's tag too, and keeps a plan tag when the shop's is cleared", async () => {
+    const s = await setupShop({ memberTag: "active-subscriber" });
+    const sub = await subscribe(s);
+    const shopify = tagShopify();
+    await tags(s, shopify.graphql);
+    expect((await tagged(s))[sub.customerGid]).toBe("active-subscriber");
+
+    await db().plan.update({ where: { id: s.plan.id }, data: { memberTag: "member-reader" } });
+    await db().shop.update({ where: { id: s.shop.id }, data: { memberDiscountTag: null } });
+    await tags(s, shopify.graphql);
+    expect(shopify.calls.slice(1)).toEqual([
+      { op: "tagsRemove", id: sub.customerGid, tag: "active-subscriber" },
+      { op: "tagsAdd", id: sub.customerGid, tag: "member-reader" },
+    ]);
   });
 
   it("pages through many customers", async () => {

@@ -8,6 +8,7 @@ import { useFetcher, useLoaderData } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { createDb } from "../db.server";
+import { listPlans, retrySync } from "../plans.server";
 import {
   EMAIL_KEYS,
   getOrCreateShop,
@@ -28,6 +29,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   return {
     releaseWordSingular: shop.releaseWordSingular,
     releaseWordPlural: shop.releaseWordPlural,
+    vocabulary: shop.vocabulary,
     allowedCountries: (shop.allowedCountries as string[]).join(", "),
     orderTiming: shop.orderTiming,
     emails: Object.fromEntries(
@@ -48,9 +50,15 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       errors: parsed.errors,
     } satisfies ActionData;
   }
-  const db = createDb(context.cloudflare.env.DB);
+  const { env } = context.cloudflare;
+  const db = createDb(env.DB);
   const shop = await getOrCreateShop(db, session.shop);
   await saveSettings(db, shop.id, parsed.values);
+  // The words are also the option name on each plan's group in Shopify, and the picker's: sync them.
+  if (shop.vocabulary !== parsed.values.vocabulary) {
+    const ref = { id: shop.id, shopDomain: session.shop };
+    for (const plan of await listPlans(db, shop.id)) await retrySync(env, db, ref, plan.id);
+  }
   return { ok: true, message: "Settings saved." } satisfies ActionData;
 };
 
@@ -80,7 +88,7 @@ export default function Settings() {
     <s-page heading="Settings">
       <fetcher.Form method="post">
         <s-stack gap="base">
-          <s-section heading="Release word">
+          <s-section heading="Words">
             <s-stack gap="base">
               <s-paragraph>
                 Customers see this word everywhere, such as &ldquo;issue&rdquo;,
@@ -98,6 +106,20 @@ export default function Settings() {
                 value={settings.releaseWordPlural}
                 error={errors.releaseWordPlural}
               />
+              <s-select
+                label="What customers buy"
+                name="vocabulary"
+                value={settings.vocabulary}
+                details="The words in the customer account, emails, the plan picker and checkout's option name."
+                error={errors.vocabulary}
+              >
+                <s-option value="SUBSCRIPTIONS">
+                  Subscriptions: subscription, subscriber, subscribe
+                </s-option>
+                <s-option value="MEMBERSHIPS">
+                  Memberships: membership, member, join
+                </s-option>
+              </s-select>
             </s-stack>
           </s-section>
 

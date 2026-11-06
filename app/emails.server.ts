@@ -281,6 +281,7 @@ type Shop = {
   shopDomain: string;
   releaseWordSingular: string;
   releaseWordPlural: string;
+  vocabulary?: string;
   emailsEnabled: unknown;
   timezone: string | null;
 };
@@ -511,6 +512,7 @@ function copyOf(shop: Shop, data: ShopifyShop): ShopCopy {
     url: data.primaryDomain?.url ?? `https://${shop.shopDomain}`,
     singular: shop.releaseWordSingular,
     plural: shop.releaseWordPlural,
+    vocabulary: shop.vocabulary,
     timezone: shop.timezone,
     address: address
       ? [address.address1, address.address2, address.city, address.provinceCode, address.zip, address.countryCodeV2]
@@ -587,6 +589,7 @@ export async function runEmailSlice(
       shopDomain: true,
       releaseWordSingular: true,
       releaseWordPlural: true,
+      vocabulary: true,
       emailsEnabled: true,
       timezone: true,
       orderTiming: true,

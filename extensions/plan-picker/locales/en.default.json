@@ -1,6 +1,7 @@
 {
   "plan_picker": {
     "legend": "Subscription plan",
+    "legend_membership": "Membership",
     "gift": "This is a gift",
     "gift_email": "Recipient's email",
     "gift_name": "Recipient's name",

@@ -187,8 +187,14 @@ describe("settings", () => {
         ],
         giftKeys: ["gift to"],
         statusKnown: true,
+        orderTag: null,
+        listFrom: null,
       },
     });
+    const more = parseSettings({ plans: { a: "500" }, issues: "", giftKeys: "", statusKnown: true, orderTag: " Subscriber ", listFrom: "2026-02-01" });
+    expect(more.ok && more.settings).toMatchObject({ orderTag: "subscriber", listFrom: "2026-02-01T00:00:00.000Z" });
+    const bad = parseSettings({ plans: { a: "500" }, issues: "", giftKeys: "", statusKnown: true, listFrom: "Feb 2026" });
+    expect(bad.ok).toBe(false);
   });
 
   it("says what's wrong rather than guessing", () => {
@@ -386,6 +392,56 @@ describe("unused paid releases carry forward (N, 2026-11-05)", () => {
     ]));
     expect(r.facts).toMatchObject({ paid: 2, received: [2], remaining: 1, carriedOver: 1 });
     expect(r.flags).not.toContain("CHARGES_AT_NEXT_RELEASE");
+  });
+
+  describe("Cake Zine's shipped list (N, 2026-11-06)", () => {
+    // Memberships launched with Steak Zine: the list starts there, and its issues went out on orders the
+    // old app tagged `subscriber`, as did a new member's first issue, added to their sign-up order.
+    const steak = issue(1, D("2026-04-15"), ["cz00sz-001"]);
+    const vol8 = issue(2, D("2026-10-01"), ["cz008-001"]);
+    const copy = (sku: string, at: string, tags: string[] = ["subscriber"]) =>
+      order(at, [{ sku, ...priced("0.00") }], { tags });
+    const tagged = (extra: Partial<ImportSettings> = {}) =>
+      on([steak, vol8], { settings: { ...settings, issues: [steak, vol8], orderTag: "subscriber", ...extra } });
+
+    it("with an order tag, a copy bought in the shop isn't a member's, and a tagged order is", () => {
+      // Joined in May, after Steak Zine shipped, and bought a copy of it in June: only Volume 8 is theirs.
+      const history = [copy("CZ008-001", D("2026-10-05")), copy("CZ00SZ-001", D("2026-06-02"), []), order(D("2026-05-20"), "sub")];
+      expect(one(customer(history), tagged()).facts).toMatchObject({ paid: 2, received: [2], remaining: 1 });
+      // Without the tag, the bought copy would have used up one of their paid issues.
+      expect(one(customer(history), on([steak, vol8])).facts).toMatchObject({ received: [1, 2], remaining: 0 });
+    });
+
+    it("counts a first issue added to the sign-up order itself", () => {
+      const signUp = order(D("2026-06-10"), [{ variant: { id: SUB_VARIANT } }, { sku: "CZ00SZ-001", ...priced("0.00") }], {
+        tags: ["subscriber", "free-shipping"],
+      });
+      const r = one(customer([copy("CZ008-001", D("2026-10-05")), signUp]), tagged());
+      expect(r.facts).toMatchObject({ paid: 2, received: [1, 2], remaining: 0 });
+    });
+
+    it("a sign-up before the first listed issue: counted in full, and not flagged when the list covers its date", () => {
+      const history = [copy("CZ008-001", D("2026-10-05")), copy("CZ00SZ-001", D("2026-04-20")), order(D("2026-03-10"), "sub")];
+      // Today: the balance is right, but the line is flagged as if a purchase went uncounted.
+      const before = one(customer(history), tagged());
+      expect(before.facts).toMatchObject({ paid: 2, received: [1, 2], remaining: 0, uncountedPurchases: 0 });
+      expect(before.flags).toContain("HISTORY_BEFORE_LIST");
+      // With the day memberships began: the same balance, and no flag.
+      const covered = one(customer(history), tagged({ listFrom: "2026-02-01T00:00:00.000Z" }));
+      expect(covered.facts).toMatchObject({ paid: 2, received: [1, 2], remaining: 0, uncountedPurchases: 0 });
+      expect(covered.flags).not.toContain("HISTORY_BEFORE_LIST");
+    });
+
+    it("a list date counts an earlier purchase in the chain too, instead of dropping it", () => {
+      // A purchase and its renewal, both before the first listed issue: without the date only the last counts.
+      const history = [copy("CZ00SZ-001", D("2026-04-20")), order(D("2026-02-20"), "sub"), order(D("2025-03-01"), "sub")];
+      expect(one(customer(history), tagged()).facts).toMatchObject({ paid: 2, remaining: 1, uncountedPurchases: 1 });
+      expect(one(customer(history), tagged({ listFrom: "2025-01-01T00:00:00.000Z" })).facts).toMatchObject({
+        paid: 4,
+        remaining: 3,
+        uncountedPurchases: 0,
+      });
+    });
   });
 
   describe("a shipped list that doesn't reach back", () => {

@@ -23,7 +23,11 @@
   assign legend = block.settings.heading
   assign legend_class = ''
   if legend == blank
-    assign legend = 'plan_picker.legend' | t
+    if app.metafields.release_subscriptions.vocabulary.value == 'memberships'
+      assign legend = 'plan_picker.legend_membership' | t
+    else
+      assign legend = 'plan_picker.legend' | t
+    endif
     assign legend_class = ' plan-picker__legend--hidden'
   endif
   assign has_plans = false

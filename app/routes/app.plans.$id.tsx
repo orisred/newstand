@@ -181,6 +181,14 @@ export default function PlanForm() {
                 value={plan?.displayName ?? ""}
                 error={errors.displayName}
               />
+              <s-text-area
+                label="What it includes (optional)"
+                name="description"
+                details="Shown under the plan's name on the product page, such as a tier's perks. Plain text."
+                value={plan?.description ?? ""}
+                rows={3}
+                error={errors.description}
+              />
               <s-text-field
                 label="Price"
                 name="price"
@@ -307,6 +315,13 @@ export default function PlanForm() {
                 name="giftable"
                 {...(plan?.giftable ? { checked: true } : {})}
                 error={errors.giftable}
+              />
+              <s-text-field
+                label="Customer tag for this plan (optional)"
+                name="memberTag"
+                details="Added to subscribers of this plan while it counts as active, beside your member tag, and taken off when it stops. Use a tag only this app adds, so a tier can have perks of its own."
+                value={plan?.memberTag ?? ""}
+                error={errors.memberTag}
               />
             </s-stack>
           </s-section>

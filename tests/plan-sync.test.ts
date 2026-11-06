@@ -87,6 +87,8 @@ function fakeShopify() {
 
   const policyOf = (fields: Record<string, any>) => ({
     name: fields.name,
+    // Shopify reads an empty description back as null.
+    description: fields.description || null,
     options: fields.options,
     category: fields.category,
     billingPolicy: {
@@ -173,6 +175,7 @@ function fakeShopify() {
             const group = groups.get(v.id)!;
             group.name = v.input.name;
             group.appId = v.input.appId;
+            if (v.input.options) group.options = v.input.options;
             for (const fields of v.input.sellingPlansToUpdate) {
               const target = group.sellingPlans.nodes.find(
                 (p) => p.id === fields.id,
@@ -264,6 +267,7 @@ describe("the selling plan payload", () => {
       sellingPlansToCreate: [
         {
           name: "Yearly subscription",
+          description: "",
           category: "SUBSCRIPTION",
           options: ["Yearly subscription"],
           billingPolicy: { recurring: { interval: "YEAR", intervalCount: 1 } },
@@ -332,6 +336,40 @@ describe("the selling plan payload", () => {
 });
 
 describe("syncPlan", () => {
+  it("sends a tier's perk text as its selling plan's description, reads it back, and moves a change", async () => {
+    const { shop, id } = await newPlan({ description: "Early access to tickets\nMember calls" });
+    const shopify = fakeShopify();
+    expect((await syncPlan(db(), shopify.graphql, shop.id, id))?.status).toBe("SYNCED");
+    const [group] = [...shopify.groups.values()];
+    expect(group.sellingPlans.nodes[0].description).toBe("Early access to tickets\nMember calls");
+
+    // Changed in Shopify: the sync says so and puts it back.
+    group.sellingPlans.nodes[0].description = "Something else";
+    const plan = { ...(await row(id)), productGid: "gid://shopify/Product/1" } as SyncablePlan;
+    expect(describeDifferences(plan, group, "USD").join("\n")).toMatch(/Selling plan description/);
+    await db().plan.update({ where: { id }, data: { syncRevision: { increment: 1 } } });
+    expect((await syncPlan(db(), shopify.graphql, shop.id, id))?.status).toBe("SYNCED");
+    expect(group.sellingPlans.nodes[0].description).toBe("Early access to tickets\nMember calls");
+
+    // Cleared: Shopify's null and the plan's null are the same thing.
+    await updatePlan(db(), shop.id, id, input({ description: "" }));
+    expect((await syncPlan(db(), shopify.graphql, shop.id, id))?.status).toBe("SYNCED");
+    expect(group.sellingPlans.nodes[0].description).toBeNull();
+  });
+
+  it("names the group's option with the shop's words, and moves groups made before a change", async () => {
+    const { shop, id } = await newPlan();
+    const shopify = fakeShopify();
+    await syncPlan(db(), shopify.graphql, shop.id, id);
+    const [group] = [...shopify.groups.values()];
+    expect(group.options).toEqual(["Subscription"]);
+
+    await db().shop.update({ where: { id: shop.id }, data: { vocabulary: "MEMBERSHIPS" } });
+    await db().plan.update({ where: { id }, data: { syncRevision: { increment: 1 } } });
+    expect((await syncPlan(db(), shopify.graphql, shop.id, id))?.status).toBe("SYNCED");
+    expect(group.options).toEqual(["Membership"]);
+  });
+
   it("creates the group, stores its IDs and reads it back", async () => {
     const { shop, id } = await newPlan();
     const shopify = fakeShopify();

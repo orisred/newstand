@@ -5,6 +5,7 @@ import type { Graphql } from "./plan-sync.server";
 import { DUE_SUBSCRIPTION } from "./release-runs.server";
 import { PORTAL_ADDRESS_EVENT, PORTAL_CANCELLED_EVENT, portalEvent } from "./dashboard.server";
 import { markCancelled } from "./subscriptions.server";
+import { termsOf } from "./vocabulary";
 
 type Db = ReturnType<typeof createDb>;
 
@@ -17,13 +18,23 @@ type Db = ReturnType<typeof createDb>;
 
 const CHARGEBACK = "CHARGEBACK";
 
-export type Words = { singular: string; plural: string };
+export type Words = { singular: string; plural: string; vocabulary?: string | null };
 
-/** The words a customer reads. Never hard-code "issue": the shop's own word goes in. */
-export function portalCopy({ singular: word, plural: words }: Words) {
+/**
+ * The words a customer reads. Never hard-code "issue" or "subscription": the shop's own release word and
+ * vocabulary go in.
+ */
+export function portalCopy({ singular: word, plural: words, vocabulary }: Words) {
   const cap = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+  const { noun } = termsOf(vocabulary);
   return {
-    heading: "Your subscription",
+    heading: `Your ${noun}`,
+    /** The extension's own text, so it follows the shop's words too. */
+    onHoldBanner: `Your ${noun} is on hold after a payment dispute. Please contact the shop.`,
+    cancelledBanner: `This ${noun} is cancelled.`,
+    cancelButton: `Cancel ${noun}`,
+    cancelConfirm: `Cancel my ${noun}`,
+    keepButton: `Keep my ${noun}`,
     upcomingHeading: `Upcoming ${words}`,
     noUpcoming: `No ${words} are announced yet. We'll email you when the next one is.`,
     addressNote: `Changes apply to orders created from now on. Any ${word} whose order is already created keeps the address it was created with.`,
@@ -32,9 +43,9 @@ export function portalCopy({ singular: word, plural: words }: Words) {
     resumeAsked: `We've passed this on. If a payment is waiting and can be tried again now, we'll try it shortly. Refresh this page in a minute to see where it stands.`,
     cardSent: `We've emailed you a secure link to update your card.`,
     /** A gift is the recipient's to receive, not to pay for: the card on the contract is the buyer's. */
-    giftNote: `This subscription is a gift. It's already paid for, so it won't renew and you'll never be charged.`,
-    giftNoCard: `This subscription is a gift, so there's no card or payment to manage.`,
-    giftNoCancel: `This subscription is a gift, so there's nothing for you to cancel: it ends by itself after the ${words} that were paid for. If you don't want it, please contact the shop.`,
+    giftNote: `This ${noun} is a gift. It's already paid for, so it won't renew and you'll never be charged.`,
+    giftNoCard: `This ${noun} is a gift, so there's no card or payment to manage.`,
+    giftNoCancel: `This ${noun} is a gift, so there's nothing for you to cancel: it ends by itself after the ${words} that were paid for. If you don't want it, please contact the shop.`,
     giftMessageLabel: `A message with your gift (written by the sender)`,
     /** What cancelling does, before the customer decides. */
     cancel(paidLeft: number, onHold: boolean, held: number) {
@@ -42,7 +53,7 @@ export function portalCopy({ singular: word, plural: words }: Words) {
       const lines: string[] = [];
       if (onHold) {
         lines.push(
-          `Your subscription is on hold after a payment dispute. Cancelling stops any future charge. The ${words} you've paid for stay on hold until the shop reviews it.`,
+          `Your ${noun} is on hold after a payment dispute. Cancelling stops any future charge. The ${words} you've paid for stay on hold until the shop reviews it.`,
         );
       } else if (paidLeft > 0) {
         lines.push(
@@ -63,17 +74,17 @@ export function portalCopy({ singular: word, plural: words }: Words) {
     /** After cancelling, in the same terms as the note before it. */
     cancelled: (paidLeft: number, onHold: boolean) =>
       onHold
-        ? `Your subscription is cancelled and you won't be charged again. The ${words} you've paid for stay on hold until the shop reviews it.`
+        ? `Your ${noun} is cancelled and you won't be charged again. The ${words} you've paid for stay on hold until the shop reviews it.`
         : paidLeft > 0
-          ? `Your subscription is cancelled. You'll still receive the ${paidLeft} ${paidLeft === 1 ? word : words} you've paid for.`
-          : `Your subscription is cancelled. You won't be charged again.`,
+          ? `Your ${noun} is cancelled. You'll still receive the ${paidLeft} ${paidLeft === 1 ? word : words} you've paid for.`
+          : `Your ${noun} is cancelled. You won't be charged again.`,
     confirmed: `Thanks, your delivery address is confirmed.`,
     /** Shown on the email link page when the subscriber's order for that release is already created. */
     started: cap(
       `${word} orders are already created, so address changes apply to your next ${word}.`,
     ),
     /** When there's nothing left to confirm for it: not theirs, cancelled, or no longer open. */
-    closed: `We can't take an address confirmation for this ${word} any more. Sign in to check the address on your subscription.`,
+    closed: `We can't take an address confirmation for this ${word} any more. Sign in to check the address on your ${noun}.`,
   };
 }
 
@@ -112,6 +123,7 @@ export function ownSubscription(
           shopDomain: true,
           releaseWordSingular: true,
           releaseWordPlural: true,
+          vocabulary: true,
           allowedCountries: true,
         },
       },
@@ -317,12 +329,13 @@ export async function loadPortal(
   });
   const shop = await db.shop.findUnique({
     where: { shopDomain },
-    select: { releaseWordSingular: true, releaseWordPlural: true },
+    select: { releaseWordSingular: true, releaseWordPlural: true, vocabulary: true },
   });
   if (!shop) return null;
   const words = {
     singular: shop.releaseWordSingular,
     plural: shop.releaseWordPlural,
+    vocabulary: shop.vocabulary,
   };
   const copy = portalCopy(words);
 
@@ -355,6 +368,11 @@ export async function loadPortal(
     words,
     copy: {
       heading: copy.heading,
+      onHoldBanner: copy.onHoldBanner,
+      cancelledBanner: copy.cancelledBanner,
+      cancelButton: copy.cancelButton,
+      cancelConfirm: copy.cancelConfirm,
+      keepButton: copy.keepButton,
       upcomingHeading: copy.upcomingHeading,
       noUpcoming: copy.noUpcoming,
       addressNote: copy.addressNote,
@@ -421,6 +439,7 @@ export function refuseGift(
     portalCopy({
       singular: subscription.shop.releaseWordSingular,
       plural: subscription.shop.releaseWordPlural,
+      vocabulary: subscription.shop.vocabulary,
     })[what],
   );
 }
@@ -497,7 +516,7 @@ export async function changeAddress(
 ) {
   // Paid releases still ship after a cancellation, to the address on the contract when each order is created.
   if (subscription.status === "CANCELLED" && subscription.releasesRemaining <= 0) {
-    throw new PortalError("cancelled", "This subscription is cancelled.");
+    throw new PortalError("cancelled", `This ${termsOf(subscription.shop.vocabulary).noun} is cancelled.`);
   }
   const address = cleanAddress(input, subscription.shop.allowedCountries);
   const { subscriptionContractUpdate: opened } = await graphql(DRAFT_OPEN, {
@@ -506,7 +525,7 @@ export async function changeAddress(
   if (opened.userErrors.length > 0)
     throw new PortalError(
       "shopify",
-      "We couldn't open your subscription to change it.",
+      `We couldn't open your ${termsOf(subscription.shop.vocabulary).noun} to change it.`,
     );
   const { subscriptionDraftUpdate: updated } = await graphql(DRAFT_ADDRESS, {
     draft: opened.draft.id,
@@ -556,7 +575,7 @@ export async function sendCardUpdateEmail(graphql: Graphql, subscription: Own) {
   if (!id)
     throw new PortalError(
       "no_card",
-      "There's no card on this subscription to update.",
+      `There's no card on this ${termsOf(subscription.shop.vocabulary).noun} to update.`,
     );
   const { customerPaymentMethodSendUpdateEmail: result } = await graphql(
     SEND_UPDATE,
@@ -602,7 +621,7 @@ export async function cancelSubscription(
     id: subscription.contractGid,
   });
   if (result.userErrors.length > 0 && result.contract?.status !== "CANCELLED") {
-    throw new PortalError("shopify", "We couldn't cancel your subscription.");
+    throw new PortalError("shopify", `We couldn't cancel your ${termsOf(subscription.shop.vocabulary).noun}.`);
   }
   await markCancelled(rawDb, subscription.id, now);
   await portalEvent(rawDb, subscription.id, PORTAL_CANCELLED_EVENT, now);

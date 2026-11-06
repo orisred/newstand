@@ -23,6 +23,7 @@ model Shop {
   releaseWordPlural    String         @default("issues")
   allowedCountries     Json           @default("[\"US\"]")
   memberDiscountTag    String?        @default("active-subscriber")
+  vocabulary           Vocabulary     @default(SUBSCRIPTIONS) // the words customers read: "subscription" or "membership"
   orderTiming          OrderTiming    @default(READY_TO_SHIP)
   emailsEnabled        Json           @default("{}")
   timezone             String?        // IANA name from Shopify, for showing and entering release dates
@@ -36,6 +37,11 @@ model Shop {
   memberTags           MemberTag[]
   importRuns           ImportRun[]
   importRows           ImportRow[]
+}
+
+enum Vocabulary {
+  SUBSCRIPTIONS // subscription, subscriber, subscribe
+  MEMBERSHIPS // membership, member, join
 }
 
 enum ReleaseStatus {
@@ -105,6 +111,8 @@ model Plan {
   shop             Shop           @relation(fields: [shopId], references: [id])
   name             String
   displayName      String         // shown to customers, e.g. "Yearly subscription"
+  description      String?        // what the plan includes, such as a tier's perks: the selling plan's description
+  memberTag        String?        // this plan's own customer tag, added beside the shop's member tag
   sellingPlanGid   String?        @unique
   sellingPlanGroupGid String?     @unique // one group per plan, holding this plan's one selling plan
   productGid       String?        // the product the plan is sold on; null until chosen
@@ -317,7 +325,7 @@ model MemberTag {
   shopId      String
   shop        Shop     @relation(fields: [shopId], references: [id])
   customerGid String
-  tag         String?  // null = the app has put no tag on them
+  tag         String?  // the tags the app put on them, sorted and comma separated; null = none
   updatedAt   DateTime @updatedAt
 
   @@index([shopId])

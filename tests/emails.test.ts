@@ -862,6 +862,23 @@ describe("copy", () => {
     expect(renderEmail(shop, all[5]).text).toContain("another 1 drop.");
   });
 
+  it("reads membership and member for a shop that chose Memberships, and subscription by default", () => {
+    const members = { ...shop, vocabulary: "MEMBERSHIPS" };
+    for (const data of all) {
+      const { subject, text, html } = renderEmail(members, data);
+      expect(`${subject}\n${text}\n${html}`, data.kind).not.toMatch(/subscri/i);
+      expect(text).toContain("You're receiving this because you are a member of Cake <Zine> & Co.");
+    }
+    expect(renderEmail(members, all[0]).text).toContain("Thanks for joining Yearly.");
+    expect(renderEmail(members, all[1]).text).toContain("As a member, you'll get it");
+    expect(renderEmail(members, all[1]).text).toContain("the delivery address on your membership");
+    expect(renderEmail(members, all[10]).text).toContain("Your membership won't renew.");
+    expect(renderEmail(members, all[10]).text).toContain("you can join again any time");
+    expect(renderEmail(members, all[12]).subject).toBe("You've been given a membership to Cake <Zine> & Co");
+    // The default, and anything unknown, is today's wording.
+    expect(renderEmail({ ...shop, vocabulary: "TIERS" }, all[0]).text).toContain("Thanks for subscribing to Yearly.");
+  });
+
   it("offers cancelling through the portal link, in the shop's release word, and no longer asks for a reply", () => {
     const withCancel = all.filter((d) => d.kind === "upcomingCharge" || d.kind === "priceChange");
     expect(withCancel).toHaveLength(5);
@@ -885,7 +902,7 @@ describe("copy", () => {
   });
 
   it("the welcome email doesn't imply the checkout order ships a release", () => {
-    expect(renderEmail(shop, all[0]).text).toContain("only records your payment: it doesn't ship a drop");
+    expect(renderEmail(shop, all[0]).text).toContain("only records your payment: no drop ships on it.");
   });
 
   it("the pre-order email says the order is created when shipping starts, with the address as its main button", () => {
