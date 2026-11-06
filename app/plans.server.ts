@@ -1,4 +1,5 @@
 import type { createDb } from "./db.server";
+import { termsOf, type Terms } from "./vocabulary";
 import { enqueueJobs } from "./jobs/runner.server";
 import {
   BILLING_MODES,
@@ -104,9 +105,12 @@ function parseDescription(form: FormData) {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
   if (!value) return { value: null };
-  return value.length <= DESCRIPTION_MAX_LENGTH && !/[<>]|(?!\n)\p{C}/u.test(value)
+  return value.length <= DESCRIPTION_MAX_LENGTH &&
+    !/[<>]|(?!\n)\p{C}/u.test(value)
     ? { value }
-    : { error: `Use up to ${DESCRIPTION_MAX_LENGTH} characters, with no < or > characters.` };
+    : {
+        error: `Use up to ${DESCRIPTION_MAX_LENGTH} characters, with no < or > characters.`,
+      };
 }
 
 /** A Shopify tag holds no comma: Shopify splits tags on them. Empty is null. */
@@ -114,7 +118,9 @@ function parseTag(value: string) {
   if (!value) return { value: null };
   return value.length <= MEMBER_TAG_MAX_LENGTH && !/[,<>\p{C}]/u.test(value)
     ? { value }
-    : { error: `Use up to ${MEMBER_TAG_MAX_LENGTH} characters, with no commas or < > characters.` };
+    : {
+        error: `Use up to ${MEMBER_TAG_MAX_LENGTH} characters, with no commas or < > characters.`,
+      };
 }
 
 function parseLabel(value: string) {
@@ -131,6 +137,7 @@ function parseLabel(value: string) {
 export function parsePlan(
   form: FormData,
   existing?: PlanShape,
+  t: Terms = termsOf(),
 ): { ok: true; values: PlanInput } | { ok: false; errors: PlanErrors } {
   const errors: PlanErrors = {};
 
@@ -181,18 +188,16 @@ export function parsePlan(
     releasesPerTerm < 2 &&
     !errors.releasesPerTerm
   ) {
-    errors.renewalRule =
-      "A bundle of one can't renew when it runs out. Choose another renewal, or a pay-per-release plan.";
+    errors.renewalRule = `A bundle of one can't renew when it runs out. Choose another renewal, or a pay-per-release ${t.plan}.`;
   }
   const startRule = oneOf(START_RULES, text(form, "startRule"));
   if (!startRule)
-    errors.startRule = "Choose which release new subscribers start on.";
+    errors.startRule = `Choose which release new ${t.members} start on.`;
 
   // A gift buys a fixed number of releases. A per-release plan buys one and then charges for each
   // later one, which a gift never does, so it can't be offered as one.
   if (form.has("giftable") && billingMode === "PER_RELEASE") {
-    errors.giftable =
-      "Only a prepaid bundle can be bought as a gift. A per-release plan has no fixed number of releases to give.";
+    errors.giftable = `Only a prepaid bundle can be bought as a gift. A per-release ${t.plan} has no fixed number of releases to give.`;
   }
 
   const priceCents = parsePriceCents(text(form, "price"));
@@ -235,6 +240,7 @@ const planListSelect = {
   termMonths: true,
   priceCents: true,
   currency: true,
+  productGid: true,
   productTitle: true,
   active: true,
   syncStatus: true,
@@ -262,7 +268,6 @@ export function getPlan(db: Db, shopId: string, id: string) {
       startRule: true,
       autoRenew: true,
       giftable: true,
-      productGid: true,
       description: true,
       memberTag: true,
     },

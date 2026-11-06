@@ -10,6 +10,7 @@ import { enqueueJobs } from "../jobs/runner.server";
 import { capitalize } from "../release-actions";
 import { getOrCreateShop } from "../shop.server";
 import { authenticate } from "../shopify.server";
+import { useTerms } from "../vocabulary";
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -26,6 +27,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const empty = { orders: 0, revenue: 0, costs: 0, unpriced: 0, uncosted: 0 };
   const shown = Math.round(report.rows.reduce((sum, row) => sum + row.revenue, 0));
   return {
+    vocabulary: shop.vocabulary,
     word: shop.releaseWordSingular,
     plural: shop.releaseWordPlural,
     currency: report.plans[0]?.currency ?? "USD",
@@ -69,6 +71,7 @@ const dollars = (cents: number | null) => (cents === null ? "" : (cents / 100).t
 export default function Revenue() {
   const { word, plural, currency, releases, plans, paidIn, unread, waiting } =
     useLoaderData<typeof loader>();
+  const t = useTerms();
   const fetcher = useFetcher<ActionData>();
   const shopify = useAppBridge();
   const [editing, setEditing] = useState<(typeof releases)[number] | null>(null);
@@ -85,8 +88,8 @@ export default function Revenue() {
         <s-stack gap="small">
           <s-paragraph>
             Each {word} ships on a $0 order, so revenue comes from the payments. Every payment buys
-            release slots (a bundle buys all of its {plural}, a pay-per-{word} plan one), and a
-            subscriber&apos;s shipped {plural} use their slots in the order they were paid for. A{" "}
+            release slots (a bundle buys all of its {plural}, a pay-per-{word} {t.plan} one), and a{" "}
+            {t.member}&apos;s shipped {plural} use their slots in the order they were paid for. A{" "}
             {word}&apos;s revenue is the share of those payments for the {plural} that have shipped.
             A gift&apos;s payment is the buyer&apos;s order and counts the same way. Amounts are
             before tax and shipping.
@@ -104,15 +107,15 @@ export default function Revenue() {
         </s-stack>
       </s-section>
 
-      <s-section heading={`Profit per plan`} padding="none">
+      <s-section heading={`Profit per ${t.plan}`} padding="none">
         {plans.length === 0 ? (
           <s-box padding="base">
-            <s-paragraph>No plans yet.</s-paragraph>
+            <s-paragraph>No {t.plans} yet.</s-paragraph>
           </s-box>
         ) : (
           <s-table>
             <s-table-header-row>
-              <s-table-header>Plan</s-table-header>
+              <s-table-header>{t.Plan}</s-table-header>
               <s-table-header>Orders shipped</s-table-header>
               <s-table-header>Revenue</s-table-header>
               <s-table-header>Costs</s-table-header>
@@ -210,7 +213,7 @@ export default function Revenue() {
         <form ref={form} key={editing?.id}>
           <s-stack gap="base">
             <s-paragraph>
-              Recorded separately, in {currency}. Shipping is included in the plan price through a free
+              Recorded separately, in {currency}. Shipping is included in the {t.plan} price through a free
               rate, so the cost is yours. A {word} with no costs recorded counts as costing nothing, and
               the profit tables say how many orders that is.
             </s-paragraph>

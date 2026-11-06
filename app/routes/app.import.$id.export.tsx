@@ -4,6 +4,7 @@ import { createDb } from "../db.server";
 import { csvCell } from "../release-csv.server";
 import { getOrCreateShop } from "../shop.server";
 import { authenticate } from "../shopify.server";
+import { termsOf } from "../vocabulary";
 
 // No names: a contact's line number and customer link say who it is, so the file holds no personal data.
 export const loader = async ({ request, params, context }: LoaderFunctionArgs) => {
@@ -14,7 +15,7 @@ export const loader = async ({ request, params, context }: LoaderFunctionArgs) =
   const rows = await reportRows(db, env.DB, shop.id, String(params.id));
   if (!rows) throw new Response("Not found", { status: 404 });
   const header = [
-    "Contact line", "Customer link", "Category", "State", "Flags", "Plan", "Last purchase", "Last purchase date",
+    "Contact line", "Customer link", "Category", "State", "Flags", termsOf(shop.vocabulary).Plan, "Last purchase", "Last purchase date",
     "Purchases", "Quantity", "Price", "Paid", "Carried over", "Purchases not counted", "Received", "Left", "First release", "Term ends", "Next charge", "Country",
     "Contract ID", "Error",
   ];

@@ -22,6 +22,7 @@ import { MAX_RELEASES_PER_TERM, MAX_TERM_MONTHS } from "../plan-options";
 import { capitalize } from "../release-actions";
 import { getOrCreateShop } from "../shop.server";
 import { authenticate } from "../shopify.server";
+import { termsOf, useTerms } from "../vocabulary";
 
 const KEY_PATTERN = /^[A-Za-z0-9-]{8,64}$/;
 
@@ -34,6 +35,7 @@ export const loader = async ({
   const db = createDb(context.cloudflare.env.DB);
   const shop = await getOrCreateShop(db, session.shop);
   const words = {
+    vocabulary: shop.vocabulary,
     word: shop.releaseWordSingular,
     plural: shop.releaseWordPlural,
   };
@@ -42,7 +44,7 @@ export const loader = async ({
     return { ...words, plan: null, createKey: crypto.randomUUID() };
   }
   const plan = await getPlan(db, shop.id, params.id ?? "");
-  if (!plan) throw new Response("Plan not found", { status: 404 });
+  if (!plan) throw new Response(`${termsOf(shop.vocabulary).Plan} not found`, { status: 404 });
   return { ...words, plan, createKey: "" };
 };
 
@@ -63,6 +65,7 @@ export const action = async ({
   const db = createDb(env.DB);
   const shop = await getOrCreateShop(db, session.shop);
   const shopRef = { id: shop.id, shopDomain: session.shop };
+  const t = termsOf(shop.vocabulary);
 
   const creating = params.id === "new";
   const existing = creating
@@ -71,7 +74,7 @@ export const action = async ({
   if (!creating && !existing) {
     return {
       ok: false,
-      message: "That plan no longer exists.",
+      message: `That ${t.plan} no longer exists.`,
     } satisfies ActionData;
   }
   const key = form.get("key");
@@ -82,11 +85,11 @@ export const action = async ({
     } satisfies ActionData;
   }
 
-  const parsed = parsePlan(form, existing ?? undefined);
+  const parsed = parsePlan(form, existing ?? undefined, t);
   if (!parsed.ok) {
     return {
       ok: false,
-      message: "The plan was not saved. Fix the highlighted fields.",
+      message: `The ${t.plan} was not saved. Fix the highlighted fields.`,
       errors: parsed.errors,
     } satisfies ActionData;
   }
@@ -102,8 +105,8 @@ export const action = async ({
     return {
       ok: true,
       message: created
-        ? "Plan created. Syncing to Shopify."
-        : "That plan was already created.",
+        ? `${t.Plan} created. Syncing to Shopify.`
+        : `That ${t.plan} was already created.`,
     } satisfies ActionData;
   }
   const policy = String(form.get("pricePolicy"));
@@ -119,12 +122,13 @@ export const action = async ({
   await requestSync(env, db, shopRef, existing!.id);
   return {
     ok: true,
-    message: "Plan saved. Syncing to Shopify.",
+    message: `${t.Plan} saved. Syncing to Shopify.`,
   } satisfies ActionData;
 };
 
 export default function PlanForm() {
   const { word, plural, plan, createKey } = useLoaderData<typeof loader>();
+  const t = useTerms();
   const fetcher = useFetcher<ActionData>();
   const shopify = useAppBridge();
   const navigate = useNavigate();
@@ -157,9 +161,9 @@ export default function PlanForm() {
   };
 
   return (
-    <s-page heading={plan ? "Edit plan" : "Create plan"}>
+    <s-page heading={`${plan ? "Edit" : "Create"} ${t.plan}`}>
       <s-link slot="breadcrumb-actions" href="/app/plans">
-        Plans
+        {t.Plans}
       </s-link>
       <fetcher.Form method="post">
         <input type="hidden" name="key" value={createKey} />
@@ -177,14 +181,14 @@ export default function PlanForm() {
               <s-text-field
                 label="Name customers see"
                 name="displayName"
-                details={`For example "Yearly subscription" or "2 ${plural} paid upfront".`}
+                details={`For example ${t.nameExamples(plural)}.`}
                 value={plan?.displayName ?? ""}
                 error={errors.displayName}
               />
               <s-text-area
-                label="What it includes (optional)"
+                label={t.includesLabel}
                 name="description"
-                details="Shown under the plan's name on the product page, such as a tier's perks. Plain text."
+                details={`Shown under the ${t.plan}'s name on the product page, such as ${t.perks}. Plain text.`}
                 value={plan?.description ?? ""}
                 rows={3}
                 error={errors.description}
@@ -205,13 +209,13 @@ export default function PlanForm() {
                   label="If you change the price"
                   name="pricePolicy"
                   value="KEEP_OLD_PRICE"
-                  details="New subscribers always pay the new price. You decide this each time you change it."
+                  details={`New ${t.members} always pay the new price. You decide this each time you change it.`}
                 >
                   <s-option value="KEEP_OLD_PRICE">
-                    Existing subscribers keep the price they have
+                    Existing {t.members} keep the price they have
                   </s-option>
                   <s-option value="APPLY_AT_RENEWAL">
-                    Existing subscribers pay it from their next charge, at
+                    Existing {t.members} pay it from their next charge, at
                     least 30 days from now, with notice
                   </s-option>
                 </s-select>
@@ -225,8 +229,8 @@ export default function PlanForm() {
                 {plan.billingMode === "PER_RELEASE"
                   ? `Paid per ${word}.`
                   : `A bundle of ${plan.releasesPerTerm} ${plural}, ${plan.termMonths} months.`}{" "}
-                This can&apos;t change once a plan exists, because it is what
-                subscribers bought. Create a new plan instead.
+                This can&apos;t change once a {t.plan} exists, because it is what{" "}
+                {t.members} bought. Create a new {t.plan} instead.
               </s-paragraph>
             ) : (
               <s-stack gap="base">
@@ -296,7 +300,7 @@ export default function PlanForm() {
           <s-section heading="Who gets which release">
             <s-stack gap="base">
               <s-select
-                label={`First ${word} for a new subscriber`}
+                label={`First ${word} for a new ${t.member}`}
                 name="startRule"
                 value={plan?.startRule ?? "PREORDER_SWITCHOVER"}
                 error={errors.startRule}
@@ -317,9 +321,9 @@ export default function PlanForm() {
                 error={errors.giftable}
               />
               <s-text-field
-                label="Customer tag for this plan (optional)"
+                label={`Customer tag for this ${t.plan} (optional)`}
                 name="memberTag"
-                details="Added to subscribers of this plan while it counts as active, beside your member tag, and taken off when it stops. Use a tag only this app adds, so a tier can have perks of its own."
+                details={`Added to ${t.members} of this ${t.plan} while it counts as active, beside your member tag, and taken off when it stops. Use a tag only this app adds, so a ${t.plan} can have perks of its own.`}
                 value={plan?.memberTag ?? ""}
                 error={errors.memberTag}
               />
@@ -329,12 +333,12 @@ export default function PlanForm() {
           <s-section heading="Product">
             <s-stack gap="base">
               <s-paragraph>
-                The product customers subscribe on. The plan appears in its
-                purchase options. While it has a plan, the product can only be
+                The product customers {t.subscribeOn}. The {t.plan} appears in its
+                purchase options. While it has a {t.plan}, the product can only be
                 bought with one, so it cannot be bought as a one-time purchase.
                 It must be a physical product, so checkout asks for a shipping
-                address. If you turn off its last plan, it goes back to selling
-                normally.
+                address. If you turn off its last {t.plan}, it goes offline
+                (draft) in Shopify.
               </s-paragraph>
               <s-stack direction="inline" gap="base" alignItems="center">
                 <s-button onClick={pickProduct}>

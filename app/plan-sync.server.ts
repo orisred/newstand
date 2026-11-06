@@ -204,6 +204,7 @@ const PRODUCT_STATE = `#graphql
     nodes(ids: $ids) {
       ... on Product {
         id
+        status
         requiresSellingPlan
         sellingPlanGroupsCount { count }
         variants(first: 100) { nodes { inventoryItem { requiresShipping } } }
@@ -346,10 +347,12 @@ async function run(
  * Keeps the product from being bought outside a plan, and says when it can't ship.
  * - A product with plans must require one, or a one-time purchase makes an order with no
  *   subscription behind it. Set when a plan is attached.
- * - A product losing its last selling plan group goes back to selling normally, because one that
- *   requires a plan and has none can't be bought at all. This runs just before the group comes off, so
- *   it still counts that group, and so a sync dying between the two leaves a product that can be bought:
- *   its retry still sees the plan on it, which it wouldn't if the plan had already come off.
+ * - A product losing its last selling plan group goes offline (draft), because one that
+ *   requires a plan and has none can't be bought at all, and selling it normally would
+ *   sell the release without a subscription. A product gaining a plan that is draft comes back online.
+ *   This runs just before the group comes off, so it still counts that group, and so a sync dying
+ *   between the two leaves the product offline: its retry still sees the plan on it, which it
+ *   wouldn't if the plan had already come off.
  * - The subscription item must be shippable so checkout always asks for an address; a variant
  *   that isn't is reported as a difference, since the app can't fix it without changing stock.
  */
@@ -362,6 +365,7 @@ async function settleProducts(
   if (ids.length === 0) return [];
   type State = {
     id: string;
+    status: string;
     requiresSellingPlan: boolean;
     sellingPlanGroupsCount: { count: number };
     variants: { nodes: { inventoryItem: { requiresShipping: boolean } }[] };
@@ -374,11 +378,15 @@ async function settleProducts(
     if (!product) continue;
     const isAttached = attached.includes(product.id);
     const wantRequired = isAttached || product.sellingPlanGroupsCount.count > 1;
-    if (product.requiresSellingPlan !== wantRequired) {
+    const offline = !wantRequired && product.sellingPlanGroupsCount.count === 1;
+    const status = isAttached
+      ? product.status === "DRAFT" ? "ACTIVE" : product.status
+      : offline ? "DRAFT" : product.status;
+    if (product.requiresSellingPlan !== wantRequired || product.status !== status) {
       await run(
         graphql,
         SET_REQUIRES_PLAN,
-        { product: { id: product.id, requiresSellingPlan: wantRequired } },
+        { product: { id: product.id, requiresSellingPlan: wantRequired, status } },
         "productUpdate",
       );
     }

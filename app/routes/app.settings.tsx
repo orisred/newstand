@@ -19,6 +19,7 @@ import {
   type SettingsErrors,
 } from "../shop.server";
 import { authenticate } from "../shopify.server";
+import { useTerms } from "../vocabulary";
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -73,6 +74,7 @@ const EMAIL_LABELS: Record<EmailKey, string> = {
 
 export default function Settings() {
   const settings = useLoaderData<typeof loader>();
+  const t = useTerms();
   const fetcher = useFetcher<ActionData>();
   const shopify = useAppBridge();
   const saving = fetcher.state !== "idle";
@@ -110,7 +112,7 @@ export default function Settings() {
                 label="What customers buy"
                 name="vocabulary"
                 value={settings.vocabulary}
-                details="The words in the customer account, emails, the plan picker and checkout's option name."
+                details={`The words in the customer account, emails, the ${t.plan} picker and checkout's option name.`}
                 error={errors.vocabulary}
               >
                 <s-option value="SUBSCRIPTIONS">
@@ -133,7 +135,7 @@ export default function Settings() {
                 error={errors.allowedCountries}
               />
               <s-select
-                label="Create subscribers' orders"
+                label={`Create ${t.members}' orders`}
                 name="orderTiming"
                 value={settings.orderTiming}
                 error={errors.orderTiming}
@@ -151,7 +153,7 @@ export default function Settings() {
           <s-section heading="Emails">
             <s-stack gap="small">
               <s-paragraph>
-                Choose which emails the app sends to subscribers. Turning one off stops it from then on, and turning it back on doesn&apos;t send the ones missed in between. The notice of a price rise has no switch: it is what gives subscribers their 30 days&apos; notice.
+                Choose which emails the app sends to {t.members}. Turning one off stops it from then on, and turning it back on doesn&apos;t send the ones missed in between. The notice of a price rise has no switch: it is what gives {t.members} their 30 days&apos; notice.
               </s-paragraph>
               {(Object.keys(EMAIL_LABELS) as EmailKey[]).map((key) => (
                 <s-checkbox

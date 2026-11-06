@@ -15,6 +15,7 @@ import { graphqlOf } from "../plan-sync.server";
 import { capitalize } from "../release-actions";
 import { getOrCreateShop } from "../shop.server";
 import { authenticate } from "../shopify.server";
+import { useTerms } from "../vocabulary";
 
 export const loader = async ({ request, context, params }: LoaderFunctionArgs) => {
   const { session, admin } = await authenticate.admin(request);
@@ -35,6 +36,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
     (gift || !subscription.plan.autoRenew);
   const currency = subscription.plan.currency;
   return {
+    vocabulary: shop.vocabulary,
     word: shop.releaseWordSingular,
     plural: shop.releaseWordPlural,
     state: stateOf({ ...subscription, finished }),
@@ -85,7 +87,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
   };
 };
 
-/** A merchant lets a subscriber held by the import go live. */
+/** A merchant lets a member held by the import go live. */
 export const action = async ({ request, context, params }: ActionFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const { env } = context.cloudflare;
@@ -113,10 +115,11 @@ const EMAIL_TONE = {
 export default function Subscriber() {
   const s = useLoaderData<typeof loader>();
   const release = useFetcher<typeof action>();
+  const t = useTerms();
   return (
     <s-page heading={s.customer.name}>
       <s-link slot="breadcrumb-actions" href="/app/subscribers">
-        Subscribers
+        {t.Members}
       </s-link>
       {s.noCardSince && (
         <s-banner tone="critical" heading="No card on this contract">
@@ -131,9 +134,9 @@ export default function Subscriber() {
           <s-stack gap="small">
             <s-paragraph>
               Nothing is charged while it&apos;s on hold, and paid {s.plural} still ship. Check the
-              old app has stopped charging this subscriber first.{" "}
+              old app has stopped charging this {t.member} first.{" "}
               {s.depleting
-                ? "This plan renews when paid releases run out, so with none left, releasing it charges within the hour, with no notice sent."
+                ? `This ${t.plan} renews when paid releases run out, so with none left, releasing it charges within the hour, with no notice sent.`
                 : "Releasing it moves a term date less than 22 days away out to 22 days from now, so the upcoming-charge notice goes first."}
               {s.zeroPrice &&
                 " Their last purchase cost nothing, so this contract's price is $0 and it renews for nothing. Releasing the hold doesn't change that."}
@@ -148,7 +151,7 @@ export default function Subscriber() {
           </s-stack>
         </s-banner>
       )}
-      <s-section heading="Subscription">
+      <s-section heading={t.Noun}>
         <s-stack gap="small">
           <s-stack direction="inline" gap="small">
             <s-badge tone={s.state.tone}>{s.state.text}</s-badge>
@@ -158,7 +161,7 @@ export default function Subscriber() {
             {s.pausedReason === "FAILED_PAYMENT" && <s-badge tone="critical">Failed payment</s-badge>}
           </s-stack>
           <s-text>Customer: <s-link href={`shopify://admin/customers/${s.customer.id}`}>{s.customer.name}</s-link></s-text>
-          <s-text>Plan: {s.plan}</s-text>
+          <s-text>{t.Plan}: {s.plan}</s-text>
           <s-text>Copies of each {s.word}: {s.quantity}</s-text>
           <s-text>Paid {s.word} still to ship: {s.remaining}</s-text>
           <s-text>Term ends: {s.perRelease ? "Per release, no term" : (s.termEnds ?? "None")}</s-text>

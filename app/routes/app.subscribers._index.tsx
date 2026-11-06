@@ -12,6 +12,7 @@ import { createDb } from "../db.server";
 import { graphqlOf } from "../plan-sync.server";
 import { getOrCreateShop } from "../shop.server";
 import { authenticate } from "../shopify.server";
+import { useTerms } from "../vocabulary";
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { session, admin } = await authenticate.admin(request);
@@ -29,6 +30,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   );
   const names = await customerNames(graphqlOf(admin), list.rows.map((row) => row.customerGid));
   return {
+    vocabulary: shop.vocabulary,
     word: shop.releaseWordSingular,
     plural: shop.releaseWordPlural,
     view,
@@ -67,12 +69,13 @@ const VIEW_TEXT: Record<View, string> = {
 
 export default function Subscribers() {
   const { word, plural, view, counts, rows, next } = useLoaderData<typeof loader>();
+  const t = useTerms();
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const count = (key: View) => (key === "all" ? counts.total : counts[key]);
 
   return (
-    <s-page heading="Subscribers">
+    <s-page heading={t.Members}>
       {counts.noCard > 0 && (
         <s-banner tone="critical" heading={`${counts.noCard} imported with no card`}>
           <s-paragraph>
@@ -118,8 +121,8 @@ export default function Subscribers() {
           </s-stack>
         </s-stack>
         <s-paragraph>
-          A gift, or a plan that doesn&apos;t renew, is finished once its last {word} has
-          shipped, even though Shopify still lists it as active. Churn counts subscribers who
+          A gift, or a {t.plan} that doesn&apos;t renew, is finished once its last {word} has
+          shipped, even though Shopify still lists it as active. Churn counts {t.members} who
           cancelled; a gift&apos;s recipient can&apos;t cancel, so gifts are left out.
         </s-paragraph>
       </s-section>
@@ -138,7 +141,7 @@ export default function Subscribers() {
         </s-stack>
         {rows.length === 0 ? (
           <s-box padding="base">
-            <s-paragraph>No subscribers here yet.</s-paragraph>
+            <s-paragraph>No {t.members} here yet.</s-paragraph>
           </s-box>
         ) : (
           <s-table
@@ -151,7 +154,7 @@ export default function Subscribers() {
             <s-table-header-row>
               <s-table-header>Customer</s-table-header>
               <s-table-header>Status</s-table-header>
-              <s-table-header>Plan</s-table-header>
+              <s-table-header>{t.Plan}</s-table-header>
               <s-table-header>{capitalize(plural)} left</s-table-header>
               <s-table-header>Term ends</s-table-header>
               <s-table-header>Portal</s-table-header>
