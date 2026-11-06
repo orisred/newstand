@@ -16,12 +16,14 @@ import {
 } from "../plans.server";
 import { getOrCreateShop } from "../shop.server";
 import { authenticate } from "../shopify.server";
+import { termsOf, useTerms } from "../vocabulary";
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const db = createDb(context.cloudflare.env.DB);
   const shop = await getOrCreateShop(db, session.shop);
   return {
+    vocabulary: shop.vocabulary,
     word: shop.releaseWordSingular,
     plural: shop.releaseWordPlural,
     plans: await listPlans(db, shop.id),
@@ -37,10 +39,11 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const db = createDb(env.DB);
   const shop = await getOrCreateShop(db, session.shop);
   const shopRef = { id: shop.id, shopDomain: session.shop };
+  const t = termsOf(shop.vocabulary);
   const intent = form.get("intent");
   const planId = form.get("planId");
   if (typeof planId !== "string") {
-    return { ok: false, message: "Unknown plan." } satisfies ActionData;
+    return { ok: false, message: `Unknown ${t.plan}.` } satisfies ActionData;
   }
 
   if (intent === "activate" || intent === "deactivate") {
@@ -53,15 +56,15 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     if (!found)
       return {
         ok: false,
-        message: "That plan no longer exists.",
+        message: `That ${t.plan} no longer exists.`,
       } satisfies ActionData;
     await requestSync(env, db, shopRef, planId);
     return {
       ok: true,
       message:
         intent === "activate"
-          ? "Plan turned on. It will appear on its product shortly."
-          : "Plan turned off. It will leave its product shortly; current subscribers aren't affected.",
+          ? `${t.Plan} turned on. It will appear on its product shortly.`
+          : `${t.Plan} turned off. It will leave its product shortly; current ${t.members} aren't affected.`,
     } satisfies ActionData;
   }
   if (intent === "sync") {
@@ -70,7 +73,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
       ? ({ ok: true, message: "Sync started." } satisfies ActionData)
       : ({
           ok: false,
-          message: "That plan no longer exists.",
+          message: `That ${t.plan} no longer exists.`,
         } satisfies ActionData);
   }
   return { ok: false, message: "Unknown action." } satisfies ActionData;
@@ -94,6 +97,7 @@ const MAX_POLLS = 20;
 
 export default function Plans() {
   const { word, plural, plans } = useLoaderData<typeof loader>();
+  const t = useTerms();
   const fetcher = useFetcher<ActionData>();
   const revalidator = useRevalidator();
   const shopify = useAppBridge();
@@ -122,112 +126,122 @@ export default function Plans() {
     return () => clearInterval(timer);
   }, [waiting, revalidator]);
 
+  // One section per product, in the order its first plan was made.
+  const byProduct = new Map<string, typeof plans>();
+  for (const plan of plans) {
+    const group = byProduct.get(plan.productGid);
+    if (group) group.push(plan);
+    else byProduct.set(plan.productGid, [plan]);
+  }
+  const products = [...byProduct.values()];
+
   const submit = (intent: string, planId: string) =>
     fetcher.submit({ intent, planId }, { method: "POST" });
 
   return (
-    <s-page heading="Plans">
+    <s-page heading={t.Plans}>
       <s-button slot="primary-action" variant="primary" href="/app/plans/new">
-        Create plan
+        Create {t.plan}
       </s-button>
-      <s-section padding="none">
-        {plans.length === 0 ? (
-          <s-box padding="base">
-            <s-paragraph>
-              No plans yet. A plan is what customers buy: {plural} paid one at a
-              time, or a prepaid bundle.
-            </s-paragraph>
-          </s-box>
-        ) : (
-          <s-table>
-            <s-table-header-row>
-              <s-table-header>Plan</s-table-header>
-              <s-table-header>Customers see</s-table-header>
-              <s-table-header>Price</s-table-header>
-              <s-table-header>Product</s-table-header>
-              <s-table-header>Shopify</s-table-header>
-              <s-table-header>Actions</s-table-header>
-            </s-table-header-row>
-            <s-table-body>
-              {plans.map((plan) => (
-                <s-table-row key={plan.id}>
-                  <s-table-cell>
-                    <s-stack gap="small-300">
-                      <s-text>{plan.name}</s-text>
-                      <s-text color="subdued">
-                        {plan.billingMode === "PER_RELEASE"
-                          ? `Paid per ${word}`
-                          : `${plan.releasesPerTerm} ${plural} prepaid, ${plan.termMonths} months`}
-                      </s-text>
-                      {!plan.active && <s-badge tone="neutral">Off</s-badge>}
-                    </s-stack>
-                  </s-table-cell>
-                  <s-table-cell>{plan.displayName}</s-table-cell>
-                  <s-table-cell>
-                    {money(plan.priceCents, plan.currency)}
-                  </s-table-cell>
-                  <s-table-cell>{plan.productTitle ?? "None"}</s-table-cell>
-                  <s-table-cell>
-                    <s-stack gap="small-300">
-                      <s-badge tone={STATUS[plan.syncStatus].tone}>
-                        {STATUS[plan.syncStatus].text}
-                      </s-badge>
-                      {plan.syncMessage && (
-                        <s-text color="subdued">{plan.syncMessage}</s-text>
-                      )}
-                    </s-stack>
-                  </s-table-cell>
-                  <s-table-cell>
-                    <s-stack direction="inline" gap="small">
-                      <s-button
-                        href={`/app/plans/${encodeURIComponent(plan.id)}`}
-                      >
-                        Edit
-                      </s-button>
-                      {plan.syncStatus !== "SYNCED" &&
-                        plan.syncStatus !== "SYNCING" && (
+      {plans.length === 0 ? (
+        <s-section>
+          <s-paragraph>
+            No {t.plans} yet. A {t.plan} is what customers buy: {plural} paid
+            one at a time, or a prepaid bundle.
+          </s-paragraph>
+        </s-section>
+      ) : (
+        products.map((group) => (
+          <s-section key={group[0].productGid} heading={group[0].productTitle}>
+            <s-table>
+              <s-table-header-row>
+                <s-table-header>{t.Plan}</s-table-header>
+                <s-table-header>Customers see</s-table-header>
+                <s-table-header>Price</s-table-header>
+                <s-table-header>Shopify</s-table-header>
+                <s-table-header>Actions</s-table-header>
+              </s-table-header-row>
+              <s-table-body>
+                {group.map((plan) => (
+                  <s-table-row key={plan.id}>
+                    <s-table-cell>
+                      <s-stack gap="small-300">
+                        <s-text>{plan.name}</s-text>
+                        <s-text color="subdued">
+                          {plan.billingMode === "PER_RELEASE"
+                            ? `Paid per ${word}`
+                            : `${plan.releasesPerTerm} ${plural} prepaid, ${plan.termMonths} months`}
+                        </s-text>
+                        {!plan.active && <s-badge tone="neutral">Off</s-badge>}
+                      </s-stack>
+                    </s-table-cell>
+                    <s-table-cell>{plan.displayName}</s-table-cell>
+                    <s-table-cell>
+                      {money(plan.priceCents, plan.currency)}
+                    </s-table-cell>
+                    <s-table-cell>
+                      <s-stack gap="small-300">
+                        <s-badge tone={STATUS[plan.syncStatus].tone}>
+                          {STATUS[plan.syncStatus].text}
+                        </s-badge>
+                        {plan.syncMessage && (
+                          <s-text color="subdued">{plan.syncMessage}</s-text>
+                        )}
+                      </s-stack>
+                    </s-table-cell>
+                    <s-table-cell>
+                      <s-stack direction="inline" gap="small">
+                        <s-button
+                          href={`/app/plans/${encodeURIComponent(plan.id)}`}
+                        >
+                          Edit
+                        </s-button>
+                        {plan.syncStatus !== "SYNCED" &&
+                          plan.syncStatus !== "SYNCING" && (
+                            <s-button
+                              {...(busy ? { disabled: true } : {})}
+                              onClick={() => submit("sync", plan.id)}
+                            >
+                              Sync now
+                            </s-button>
+                          )}
+                        {plan.syncStatus === "SYNCED" && (
                           <s-button
                             {...(busy ? { disabled: true } : {})}
                             onClick={() => submit("sync", plan.id)}
                           >
-                            Sync now
+                            Check Shopify
                           </s-button>
                         )}
-                      {plan.syncStatus === "SYNCED" && (
                         <s-button
+                          tone={plan.active ? "critical" : "neutral"}
                           {...(busy ? { disabled: true } : {})}
-                          onClick={() => submit("sync", plan.id)}
+                          onClick={() =>
+                            submit(
+                              plan.active ? "deactivate" : "activate",
+                              plan.id,
+                            )
+                          }
                         >
-                          Check Shopify
+                          {plan.active ? "Turn off" : "Turn on"}
                         </s-button>
-                      )}
-                      <s-button
-                        tone={plan.active ? "critical" : "neutral"}
-                        {...(busy ? { disabled: true } : {})}
-                        onClick={() =>
-                          submit(
-                            plan.active ? "deactivate" : "activate",
-                            plan.id,
-                          )
-                        }
-                      >
-                        {plan.active ? "Turn off" : "Turn on"}
-                      </s-button>
-                    </s-stack>
-                  </s-table-cell>
-                </s-table-row>
-              ))}
-            </s-table-body>
-          </s-table>
-        )}
-      </s-section>
-      <s-section heading="About turning a plan off">
+                      </s-stack>
+                    </s-table-cell>
+                  </s-table-row>
+                ))}
+              </s-table-body>
+            </s-table>
+          </s-section>
+        ))
+      )}
+      <s-section heading={`About turning a ${t.plan} off`}>
         <s-paragraph>
-          A plan that is off disappears from its product, so no one new can buy
-          it. Nothing is deleted: customers already on it keep their {plural},
-          and turning it on puts it back. A new price applies to new sign-ups.
-          While a product has a plan, it can only be bought with one. When its
-          last plan is turned off, it goes back to selling normally.
+          A {t.plan} that is off disappears from its product, so no one new can
+          buy it. Nothing is deleted: customers already on it keep their{" "}
+          {plural}, and turning it on puts it back. A new price applies to new
+          sign-ups. While a product has a {t.plan}, it can only be bought with
+          one. When its last {t.plan} is turned off, it goes offline (draft) in
+          Shopify.
         </s-paragraph>
       </s-section>
     </s-page>

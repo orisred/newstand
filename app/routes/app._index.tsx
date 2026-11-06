@@ -45,6 +45,7 @@ import {
 } from "../releases.server";
 import { getOrCreateShop } from "../shop.server";
 import { authenticate } from "../shopify.server";
+import { termsOf, useTerms } from "../vocabulary";
 import { DATA_REQUEST_EVENT, dataRequestHandedOver } from "../gdpr.server";
 import { GIFT_INVALID_EVENT } from "../gifts.server";
 import {
@@ -104,6 +105,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     })),
     moreUnsure: unsure.more,
     stock,
+    vocabulary: shop.vocabulary,
     word: shop.releaseWordSingular,
     plural: shop.releaseWordPlural,
     releases,
@@ -168,6 +170,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
   const db = createDb(env.DB);
   const shop = await getOrCreateShop(db, session.shop);
   const word = shop.releaseWordSingular;
+  const t = termsOf(shop.vocabulary);
   const intent = form.get("intent");
 
   if (intent === "create") {
@@ -263,7 +266,7 @@ export const action = async ({ request, context }: ActionFunctionArgs) => {
     if (owned === 0) {
       return {
         ok: false,
-        message: "That subscriber no longer exists.",
+        message: `That ${t.member} no longer exists.`,
       } satisfies ActionData;
     }
     await enqueueJobs(env, [
@@ -395,6 +398,7 @@ export default function Releases() {
     moreUnsure,
     stock,
   } = useLoaderData<typeof loader>();
+  const t = useTerms();
   const fetcher = useFetcher<ActionData>();
   const { revalidate } = useRevalidator();
   const shopify = useAppBridge();
@@ -507,17 +511,17 @@ export default function Releases() {
         {
           kind: "dead",
           heading: "A sign-up didn't finish: a customer has paid and has nothing yet",
-          text: "The app kept failing to set up this contract, so it has no subscription and nothing will ship. Try again. If it still fails, contact support with the contract number.",
+          text: `The app kept failing to set up this contract, so it has no ${t.noun} and nothing will ship. Try again. If it still fails, contact support with the contract number.`,
         },
         {
           kind: "mixed",
-          heading: "A sign-up needs you: one contract holds more than one plan",
-          text: "Shopify put two plans on one subscription contract, and a contract is charged as a whole, so the app can't charge them separately. No subscription was created and the order stays unfulfilled. Refund it and ask the customer to buy each plan separately.",
+          heading: `A sign-up needs you: one contract holds more than one ${t.plan}`,
+          text: `Shopify put two ${t.plans} on one subscription contract, and a contract is charged as a whole, so the app can't charge them separately. No ${t.noun} was created and the order stays unfulfilled. Refund it and ask the customer to buy each ${t.plan} separately.`,
         },
         {
           kind: "gift",
           heading: "A gift needs you: its recipient couldn't be used",
-          text: "The buyer paid for a gift, but the recipient's email was missing, invalid or refused by Shopify, the gift sat in a cart with other subscriptions, or its plan isn't sold as a gift. No subscription was created, so nothing will ship or be charged, and the order stays unfulfilled. If you've fixed the cause, such as creating the customer in Shopify or making the plan giftable, try again. Otherwise contact the buyer, then refund the order or cancel its subscription contract in Shopify.",
+          text: `The buyer paid for a gift, but the recipient's email was missing, invalid or refused by Shopify, the gift sat in a cart with other ${t.nouns}, or its ${t.plan} isn't sold as a gift. No ${t.noun} was created, so nothing will ship or be charged, and the order stays unfulfilled. If you've fixed the cause, such as creating the customer in Shopify or making the ${t.plan} giftable, try again. Otherwise contact the buyer, then refund the order or cancel its subscription contract in Shopify.`,
         },
         {
           kind: "data",
@@ -590,7 +594,7 @@ export default function Releases() {
           <s-stack gap="base">
             <s-paragraph>
               The app stopped while sending these, so it can&apos;t tell whether they arrived. Sending
-              again could mean the subscriber gets the same email twice, if the first one did arrive.
+              again could mean the {t.member} gets the same email twice, if the first one did arrive.
               Leaving it could mean they never get it.
             </s-paragraph>
             {unsure.map((email) => (
@@ -636,9 +640,9 @@ export default function Releases() {
           }
         >
           <s-paragraph>
-            {plan.productTitle ?? "The plan's product"} has {Math.max(plan.stockLevel!, 0)} in
+            {plan.productTitle ?? `The ${t.plan}'s product`} has {Math.max(plan.stockLevel!, 0)} in
             stock and doesn&apos;t sell past zero, so customers {plan.stockLevel! <= 0 ? "can't" : "soon won't be able to"}{" "}
-            subscribe. Add stock, or let it continue selling when out of stock, in Shopify.
+            {t.subscribe}. Add stock, or let it continue selling when out of stock, in Shopify.
             Checked hourly.
           </s-paragraph>
         </s-banner>
@@ -701,7 +705,7 @@ export default function Releases() {
             ))}
             {morePaymentProblems && (
               <s-text color="subdued">
-                More subscribers have payment problems. They appear here as these
+                More {t.members} have payment problems. They appear here as these
                 are resolved.
               </s-text>
             )}
@@ -965,8 +969,8 @@ export default function Releases() {
 
       <s-modal id="cancel-modal" heading={`Cancel this ${word}?`}>
         <s-paragraph>
-          {cancelling?.label} will be cancelled and can&apos;t be brought back.
-          Subscribers assigned to it stay paid for the next {word}.
+          {cancelling?.label} will be cancelled and can&apos;t be brought back.{" "}
+          {t.Members} assigned to it stay paid for the next {word}.
         </s-paragraph>
         <s-button
           slot="primary-action"

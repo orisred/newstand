@@ -1,6 +1,7 @@
 import type { createDb } from "./db.server";
 import type { DueWorkFinder, Job } from "./jobs/runner.server";
 import { describeError, logEvent } from "./logger.server";
+import { termsOf, type Terms } from "./vocabulary";
 import { cycleOf, type Graphql, isThrottled } from "./plan-sync.server";
 import {
   addMonths,
@@ -131,12 +132,12 @@ export function parseSettings(input: {
   statusKnown: boolean;
   orderTag?: string;
   listFrom?: string;
-}): { ok: true; settings: ImportSettings } | { ok: false; errors: string[] } {
+}, terms: Terms = termsOf()): { ok: true; settings: ImportSettings } | { ok: false; errors: string[] } {
   const errors: string[] = [];
   const plans = Object.entries(input.plans)
     .map(([planId, raw]) => ({ planId, match: tokens(raw).map((t) => t.toLowerCase()) }))
     .filter((plan) => plan.match.length > 0);
-  if (plans.length === 0) errors.push("Say which order lines mean at least one plan.");
+  if (plans.length === 0) errors.push(`Say which order lines mean at least one ${terms.plan}.`);
 
   const issues: ImportSettings["issues"] = [];
   input.issues

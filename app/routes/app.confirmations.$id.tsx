@@ -12,6 +12,7 @@ import { createDb } from "../db.server";
 import { graphqlOf } from "../plan-sync.server";
 import { getOrCreateShop } from "../shop.server";
 import { authenticate } from "../shopify.server";
+import { useTerms } from "../vocabulary";
 
 export const loader = async ({ request, context, params }: LoaderFunctionArgs) => {
   const { session, admin } = await authenticate.admin(request);
@@ -26,6 +27,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
   const result = await listConfirmations(env.DB, shop.id, release.id);
   const names = await customerNames(graphqlOf(admin), result.rows.map((row) => row.customerGid));
   return {
+    vocabulary: shop.vocabulary,
     word: shop.releaseWordSingular,
     release,
     total: result.total,
@@ -44,6 +46,7 @@ export const loader = async ({ request, context, params }: LoaderFunctionArgs) =
 
 export default function Confirmations() {
   const c = useLoaderData<typeof loader>();
+  const t = useTerms();
   return (
     <s-page heading={`Address confirmations: ${c.release.number}. ${c.release.title}`}>
       <s-link slot="breadcrumb-actions" href="/app">
@@ -52,8 +55,8 @@ export default function Confirmations() {
       <s-section>
         <s-paragraph>
           {c.confirmed} of {c.total} confirmed their address for this {c.word}, and {c.changed}{" "}
-          changed it in their account since it was announced. Subscribers who haven&apos;t
-          confirmed are listed first. The address used is the one on the subscription when the order is
+          changed it in their account since it was announced. {t.Members} who haven&apos;t
+          confirmed are listed first. The address used is the one on the {t.noun} when the order is
           created.
         </s-paragraph>
       </s-section>

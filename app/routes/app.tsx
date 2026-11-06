@@ -4,6 +4,7 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
 
 import { authenticate } from "../shopify.server";
+import { useTerms } from "../vocabulary";
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   await authenticate.admin(request);
@@ -13,14 +14,15 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
 export default function App() {
   const { apiKey } = useLoaderData<typeof loader>();
+  const t = useTerms();
 
   return (
     <AppProvider apiKey={apiKey}>
       <s-app-nav>
         <s-link href="/app">Releases</s-link>
-        <s-link href="/app/subscribers">Subscribers</s-link>
+        <s-link href="/app/subscribers">{t.Members}</s-link>
         <s-link href="/app/revenue">Revenue</s-link>
-        <s-link href="/app/plans">Plans</s-link>
+        <s-link href="/app/plans">{t.Plans}</s-link>
         <s-link href="/app/import">Import</s-link>
         <s-link href="/app/settings">Settings</s-link>
       </s-app-nav>

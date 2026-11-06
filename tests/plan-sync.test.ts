@@ -70,11 +70,11 @@ function fakeShopify() {
   /** Products the sync has touched: whether they require a plan, and how many variants don't ship. */
   const products = new Map<
     string,
-    { requiresSellingPlan: boolean; unshippable: number }
+    { requiresSellingPlan: boolean; unshippable: number; status: string }
   >();
   const productOf = (id: string) => {
     if (!products.has(id))
-      products.set(id, { requiresSellingPlan: false, unshippable: 0 });
+      products.set(id, { requiresSellingPlan: false, unshippable: 0, status: "ACTIVE" });
     return products.get(id)!;
   };
   const calls: string[] = [];
@@ -209,6 +209,7 @@ function fakeShopify() {
               const state = productOf(id);
               return {
                 id,
+                status: state.status,
                 requiresSellingPlan: state.requiresSellingPlan,
                 sellingPlanGroupsCount: { count: attachedTo(id) },
                 variants: {
@@ -223,8 +224,10 @@ function fakeShopify() {
           };
         }
         case "PlanProductRequires":
-          productOf(v.product.id).requiresSellingPlan =
-            v.product.requiresSellingPlan;
+          Object.assign(productOf(v.product.id), {
+            requiresSellingPlan: v.product.requiresSellingPlan,
+            status: v.product.status,
+          });
           return { productUpdate: { userErrors: [] } };
       }
       throw new Error(`unexpected ${operation}`);
@@ -678,16 +681,18 @@ describe("the product a plan is attached to", () => {
     expect(result?.status).toBe("SYNCED");
   });
 
-  it("goes back to selling normally when its last plan is turned off", async () => {
+  it("goes offline when its last plan is turned off, and back online when it is turned on", async () => {
     const { shop, id } = await newPlan();
     const shopify = fakeShopify();
     await syncPlan(db(), shopify.graphql, shop.id, id);
     await setPlanActive(db(), shop.id, id, false);
     await syncPlan(db(), shopify.graphql, shop.id, id);
     expect(shopify.products.get(product)?.requiresSellingPlan).toBe(false);
+    expect(shopify.products.get(product)?.status).toBe("DRAFT");
     await setPlanActive(db(), shop.id, id, true);
     await syncPlan(db(), shopify.graphql, shop.id, id);
     expect(shopify.products.get(product)?.requiresSellingPlan).toBe(true);
+    expect(shopify.products.get(product)?.status).toBe("ACTIVE");
   });
 
   it("keeps requiring a plan while another plan is still on it", async () => {
@@ -701,9 +706,11 @@ describe("the product a plan is attached to", () => {
     await setPlanActive(db(), shop.id, a, false);
     await syncPlan(db(), shopify.graphql, shop.id, a);
     expect(shopify.products.get(product)?.requiresSellingPlan).toBe(true);
+    expect(shopify.products.get(product)?.status).toBe("ACTIVE");
     await setPlanActive(db(), shop.id, b, false);
     await syncPlan(db(), shopify.graphql, shop.id, b);
     expect(shopify.products.get(product)?.requiresSellingPlan).toBe(false);
+    expect(shopify.products.get(product)?.status).toBe("DRAFT");
   });
 
   it("releases the old product and requires a plan on the new one when the plan moves", async () => {
@@ -744,6 +751,7 @@ describe("the product a plan is attached to", () => {
     shopify.products.set(product, {
       requiresSellingPlan: false,
       unshippable: 2,
+      status: "ACTIVE",
     });
     const result = await syncPlan(db(), shopify.graphql, shop.id, id);
     expect(result?.status).toBe("MISMATCH");

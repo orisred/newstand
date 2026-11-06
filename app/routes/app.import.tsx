@@ -19,6 +19,7 @@ import { enqueueJobs } from "../jobs/runner.server";
 import { graphqlOf } from "../plan-sync.server";
 import { getOrCreateShop } from "../shop.server";
 import { authenticate } from "../shopify.server";
+import { termsOf, useTerms, type Terms } from "../vocabulary";
 
 const IMPORTS_WHEN_RUN: Record<string, string> = {
   READY: "Comes in active",
@@ -28,11 +29,12 @@ const IMPORTS_WHEN_RUN: Record<string, string> = {
   HOLD_ZERO_PRICE: "On hold: last purchase cost nothing",
   CANCELLED_OWED: "Comes in cancelled: paid releases ship, never charged",
 };
-const LEFT_OUT: Record<string, string> = {
+/** Left out of the run, in the shop's words. */
+const leftOut = (t: Terms): Record<string, string> => ({
   NO_CUSTOMER: "No customer with that email (or erased)",
   DUPLICATE_CONTACT: "Same customer as an earlier line",
   NO_ORDERS: "Customer has no real orders",
-  UNRECOGNIZED_PLAN: "Orders, but none match a plan",
+  UNRECOGNIZED_PLAN: `Orders, but none match a ${t.plan}`,
   HISTORY_TOO_LONG: "Too many orders to read",
   LAPSED: "Term over and nothing left",
   CANCELLED_NOTHING_OWED: "Cancelled, nothing owed",
@@ -40,22 +42,21 @@ const LEFT_OUT: Record<string, string> = {
   ADDRESS_NOT_ALLOWED: "Address outside your allowed countries",
   NO_ADDRESS: "No address",
   REDACTED: "Customer erased",
-  ALREADY_SUBSCRIBED: "Already subscribed in this app",
+  ALREADY_SUBSCRIBED: `Already ${t.subscribed} in this app`,
   CURRENCY_DIFFERS: "Paid in another currency",
-  PLAN_NOT_READY: "Plan isn't synced or has no product",
+  PLAN_NOT_READY: `${t.Plan} isn't synced or has no product`,
   IMPORTED_UNDER_ANOTHER_KEY: "Already imported, under a mapping or first order that has since changed: no second contract",
   READ_FAILED: "Couldn't read their orders after 5 tries: start a new dry run to try again",
-};
-const CATEGORY_TEXT: Record<string, string> = { ...IMPORTS_WHEN_RUN, ...LEFT_OUT };
+});
 
-const FLAG_TEXT: Record<string, string> = {
+const flagText = (t: Terms): Record<string, string> => ({
   NO_CARD: "No saved card: first charge will fail, retry, then pause",
   CARD_EXPIRED: "Saved card has expired",
   SEVERAL_CARDS: "Several saved cards: check the right one is used",
   STATUS_UNKNOWN: "Export doesn't say whether they cancelled",
-  TWO_SUBSCRIPTIONS: "Looks like two subscriptions",
+  TWO_SUBSCRIPTIONS: `Looks like two ${t.nouns}`,
   QUANTITY_ABOVE_ONE: "More than one copy",
-  PRICE_DIFFERS_FROM_PLAN: "Pays a different price from the plan",
+  PRICE_DIFFERS_FROM_PLAN: `Pays a different price from the ${t.plan}`,
   CHARGES_AT_NEXT_RELEASE: "Charged when the next release ships, with notice at its pre-order",
   PREORDER_SKIPPED: "Kept out of the open pre-order, which would charge with no notice",
   PREORDER_EMAIL_MISSED: "Gets the open pre-order, but not its email",
@@ -66,7 +67,7 @@ const FLAG_TEXT: Record<string, string> = {
   CARRIED_OVER: "Has paid releases left from earlier purchases",
   SHIPPED_AFTER_TERM: "A release shipped after their term with nothing to show they got it, so they keep that paid release",
   HISTORY_BEFORE_LIST: "Bought before your shipped list starts, so that purchase's balance can't be seen: list earlier releases if any shipped",
-  UNRECOGNIZED_LINES: "Also has subscription orders matching no plan",
+  UNRECOGNIZED_LINES: `Also has ${t.noun} orders matching no ${t.plan}`,
   PARTIAL_REFUND: "Last purchase was partly refunded",
   PAID_SHIPPING: "Paid shipping before; none is billed here",
   PRICE_CHANGE_PENDING: "Keeps their price: a price rise was saved before they came in",
@@ -74,7 +75,7 @@ const FLAG_TEXT: Record<string, string> = {
   CONTRACT_EXISTS: "A contract from an earlier try exists",
   CHANGED_SINCE_DRY_RUN: "Changed since the dry run",
   RENEWED_SINCE_IMPORT: "Bought again since the import: possible double charge",
-};
+});
 const NEXT_CHARGE: Record<string, string> = {
   ON_TERM_DATE: "Term date",
   NEXT_RELEASE: "When a release ships with none paid",
@@ -104,6 +105,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const planName = new Map(plans.map((plan) => [plan.id, plan.name]));
   const settings = report.run?.settings as ImportSettings | undefined;
   return {
+    vocabulary: shop.vocabulary,
     plans,
     allOrders,
     word: shop.releaseWordSingular,
@@ -176,7 +178,7 @@ export const action = async ({ request, context }: ActionFunctionArgs): Promise<
       statusKnown: form.get("statusKnown") === "true",
       orderTag: String(form.get("orderTag") ?? ""),
       listFrom: String(form.get("listFrom") ?? ""),
-    });
+    }, termsOf(shop.vocabulary));
     if (!parsed.ok) return { errors: parsed.errors };
     return startRun(db, graphqlOf(admin), shop.id, parsed.settings);
   }
@@ -197,6 +199,9 @@ const CONTACTS_PER_REQUEST = 50;
 
 export default function ImportPage() {
   const { plans, allOrders, word, plural, run, counts, toCheck, rows, page, more } = useLoaderData<typeof loader>();
+  const t = useTerms();
+  const CATEGORY_TEXT: Record<string, string> = { ...IMPORTS_WHEN_RUN, ...leftOut(t) };
+  const FLAG_TEXT = flagText(t);
   const fetcher = useFetcher<ActionData>();
   const revalidator = useRevalidator();
   const navigate = useNavigate();
@@ -282,7 +287,7 @@ export default function ImportPage() {
   const statusBlocked = run && !run.statusKnown && !understood;
 
   return (
-    <s-page heading="Import subscribers">
+    <s-page heading={`Import ${t.members}`}>
       {!allOrders && (
         <s-banner tone="critical" heading="Can't read old orders yet">
           <s-paragraph>The app needs the read_all_orders permission before an import can run.</s-paragraph>
@@ -301,8 +306,8 @@ export default function ImportPage() {
 
       <s-section heading="Start a dry run">
         <s-paragraph>
-          A dry run reads each contact&apos;s order history and writes nothing to Shopify or to your
-          subscribers. Your export stays in this browser: only each contact&apos;s email and whether
+          A dry run reads each contact&apos;s order history and writes nothing to Shopify or to your{" "}
+          {t.members}. Your export stays in this browser: only each contact&apos;s email and whether
           they cancelled are sent, to find the customer, and neither is stored.
         </s-paragraph>
         <form
@@ -337,13 +342,13 @@ export default function ImportPage() {
             <s-text-area
               name="issues"
               label={`Each ${word} already shipped, one a line`}
-              details={`number | title | YYYY-MM-DD | product or variant IDs or SKUs on its orders (optional). Without the last part, a subscriber counts as having received it if it shipped during their term while they had a paid ${word} left. Reach back as far as your subscribers' purchases go: a purchase from before the first line can't be counted. Numbers carry on into your new ${plural}.`}
+              details={`number | title | YYYY-MM-DD | product or variant IDs or SKUs on its orders (optional). Without the last part, a ${t.member} counts as having received it if it shipped during their term while they had a paid ${word} left. Reach back as far as your ${t.members}' purchases go: a purchase from before the first line can't be counted. Numbers carry on into your new ${plural}.`}
               rows={5}
             />
             <s-text-field
               name="listFrom"
               label="The list covers everything from (optional)"
-              details={`YYYY-MM-DD. If subscriptions began before the first ${word} above, the day they began: purchases from then count in full, as nothing shipped to subscribers before that ${word}. Leave empty to start at the first line.`}
+              details={`YYYY-MM-DD. If ${t.nouns} began before the first ${word} above, the day they began: purchases from then count in full, as nothing shipped to ${t.members} before that ${word}. Leave empty to start at the first line.`}
             />
             <s-text-field
               name="giftKeys"
@@ -352,7 +357,7 @@ export default function ImportPage() {
             />
             <s-text-field
               name="orderTag"
-              label={`Order tag on subscribers' ${plural} (optional)`}
+              label={`Order tag on ${t.members}' ${plural} (optional)`}
               details={`With order lines listed above, an order counts for a listed ${word} only if it has this tag, so a copy someone bought in your shop isn't counted as theirs. Leave empty to count every order.`}
             />
             <s-stack direction="inline" gap="base">
@@ -379,8 +384,8 @@ export default function ImportPage() {
               <s-banner tone="warning" heading={`Term dates were read on ${run.read}`}>
                 <s-paragraph>
                   The old app keeps charging until you switch it off, and this one never touches its
-                  contracts. A subscriber who renews there after this moment renews with a new date.
-                  The real run reads every subscriber again and uses what it finds. Anyone with a
+                  contracts. A {t.member} who renews there after this moment renews with a new date.
+                  The real run reads every {t.member} again and uses what it finds. Anyone with a
                   renewal under 21 days away is held, which also gives you that long to switch it off.
                 </s-paragraph>
               </s-banner>
@@ -415,7 +420,7 @@ export default function ImportPage() {
                 <s-table-header>People</s-table-header>
               </s-table-header-row>
               <s-table-body>
-                {[...counted(IMPORTS_WHEN_RUN), ...counted(LEFT_OUT)].map((row) => (
+                {[...counted(IMPORTS_WHEN_RUN), ...counted(leftOut(t))].map((row) => (
                   <s-table-row key={`${row.category}${row.state}`}>
                     <s-table-cell>
                       <s-link onClick={() => navigate(`?category=${row.category}`)}>
@@ -436,7 +441,7 @@ export default function ImportPage() {
                 <s-paragraph>
                   The real run creates {toImport} {toImport === 1 ? "contract" : "contracts"}, each on the customer&apos;s saved card if they
                   have one. It charges nobody, makes no orders, and sends no welcome email. It reads
-                  each subscriber again first.
+                  each {t.member} again first.
                 </s-paragraph>
                 {!run.statusKnown && (
                   <s-checkbox
@@ -479,7 +484,7 @@ export default function ImportPage() {
               <s-table-header>Line</s-table-header>
               <s-table-header>Customer</s-table-header>
               <s-table-header>Outcome</s-table-header>
-              <s-table-header>Plan</s-table-header>
+              <s-table-header>{t.Plan}</s-table-header>
               <s-table-header>Last purchase</s-table-header>
               <s-table-header>Copies, price</s-table-header>
               <s-table-header>Paid, got, left</s-table-header>
