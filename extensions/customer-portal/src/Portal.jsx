@@ -35,7 +35,7 @@ function Portal() {
 
   if (failed) {
     return (
-      <s-banner tone="critical">We couldn&apos;t load your subscription. Please refresh the page.</s-banner>
+      <s-banner tone="critical">We couldn&apos;t load this. Please refresh the page.</s-banner>
     );
   }
   if (!data) return <s-text>Loading…</s-text>;
@@ -92,14 +92,14 @@ function Subscription({data, subscription, reload}) {
         {note && <s-banner tone="success">{note}</s-banner>}
         {error && <s-banner tone="critical">{error}</s-banner>}
         {subscription.onHold && (
-          <s-banner tone="warning">Your subscription is on hold after a payment dispute. Please contact the shop.</s-banner>
+          <s-banner tone="warning">{copy.onHoldBanner}</s-banner>
         )}
         {subscription.cardProblem && !subscription.onHold && (
           <s-banner tone="warning">
             We couldn&apos;t charge your card. Update it below and we&apos;ll try again.
           </s-banner>
         )}
-        {cancelled && <s-banner tone="info">This subscription is cancelled.</s-banner>}
+        {cancelled && <s-banner tone="info">{copy.cancelledBanner}</s-banner>}
         {subscription.gift && (
           <>
             <s-banner tone="info">{copy.giftNote}</s-banner>
@@ -234,14 +234,14 @@ function Subscription({data, subscription, reload}) {
                       })
                     }
                   >
-                    Cancel my subscription
+                    {copy.cancelConfirm}
                   </s-button>
-                  <s-button onClick={() => setView(null)}>Keep my subscription</s-button>
+                  <s-button onClick={() => setView(null)}>{copy.keepButton}</s-button>
                 </s-stack>
               </s-stack>
             ) : (
               <s-button tone="critical" onClick={() => setView('cancel')}>
-                Cancel subscription
+                {copy.cancelButton}
               </s-button>
             )}
           </>

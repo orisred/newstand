@@ -57,7 +57,7 @@ import {
   runReleaseSlice,
 } from "../release-runs.server";
 import { fireScheduledRelease, publishReleaseProducts } from "../releases.server";
-import { getOrCreateShop } from "../shop.server";
+import { getOrCreateShop, publishVocabulary } from "../shop.server";
 import { unauthenticated } from "../shopify.server";
 import {
   CONTRACT_JOB,
@@ -89,6 +89,7 @@ export const jobHandlers: Record<string, JobHandler> = {
     await syncPlan(db, graphql, shopId, planId);
     await ensureCartRule(graphql);
     await publishGiftPlans(db, graphql, shopId);
+    await publishVocabulary(db, graphql, shopId);
     await publishReleaseProducts(db, graphql, shopId);
   },
 

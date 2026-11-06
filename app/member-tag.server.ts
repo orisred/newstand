@@ -36,8 +36,11 @@ const TAGS_REMOVE = `#graphql
 
 /**
  * Brings customers' tags in line with their subscriptions, for one shop, a page at a time. State-driven:
- * it compares what each customer should have (any qualifying subscription among all theirs) with
- * `MemberTag`, what the app last put on them, and fixes the difference. Every step is repeatable, so a
+ * it compares what each customer should have with `MemberTag`, what the app last put on them, and fixes
+ * the difference. What they should have is the shop's member tag if any of their subscriptions qualifies,
+ * plus the plan's own tag (`Plan.memberTag`) of each one that does, so a tier's tag comes off when that
+ * tier stops qualifying while the shop's stays for another. Both are held as one sorted, comma-separated
+ * set: Shopify tags hold no commas. Every step is repeatable, so a
  * crash, a retry or a second job changes nothing. `tagsAdd` and `tagsRemove` work for guest customers
  * too. A redacted customer has no `customerGid` to tag.
  * Tags the merchant removes by hand in Shopify aren't noticed: Shopify isn't read, only the app's record.
@@ -58,15 +61,23 @@ export async function runMemberTagSlice(
 
   const { results } = await rawDb
     .prepare(
-      `SELECT s."customerGid", m."tag" AS "current",
-         CASE WHEN MAX(CASE WHEN ${QUALIFIES} THEN 1 ELSE 0 END) = 1 THEN ?2 END AS "wanted"
-       FROM "Subscription" s
-       JOIN "Plan" p ON p."id" = s."planId"
-       LEFT JOIN "MemberTag" m ON m."id" = s."shopId" || ':' || s."customerGid"
-       WHERE s."shopId" = ?1 AND s."customerGid" <> 'redacted' AND s."customerGid" > ?3
-       GROUP BY s."customerGid"
-       HAVING "wanted" IS NOT m."tag"
-       ORDER BY s."customerGid" LIMIT ?4`,
+      `WITH subs AS (
+         SELECT s."customerGid", p."memberTag" AS "planTag", CASE WHEN ${QUALIFIES} THEN 1 ELSE 0 END AS "ok"
+         FROM "Subscription" s
+         JOIN "Plan" p ON p."id" = s."planId"
+         WHERE s."shopId" = ?1 AND s."customerGid" <> 'redacted' AND s."customerGid" > ?3
+       ), wanted AS (
+         SELECT "customerGid", ?2 AS "tag" FROM subs WHERE "ok" = 1 AND ?2 IS NOT NULL
+         UNION SELECT "customerGid", "planTag" FROM subs WHERE "ok" = 1 AND "planTag" IS NOT NULL
+       )
+       SELECT * FROM (
+         SELECT c."customerGid", m."tag" AS "current",
+           (SELECT group_concat(w."tag", ',' ORDER BY w."tag") FROM wanted w WHERE w."customerGid" = c."customerGid") AS "wanted"
+         FROM (SELECT DISTINCT "customerGid" FROM subs) c
+         LEFT JOIN "MemberTag" m ON m."id" = ?1 || ':' || c."customerGid"
+       )
+       WHERE "wanted" IS NOT "current"
+       ORDER BY "customerGid" LIMIT ?4`,
     )
     .bind(shop.id, shop.memberDiscountTag, after, CUSTOMERS_PER_SLICE, clock().toISOString())
     .all<{ customerGid: string; current: string | null; wanted: string | null }>();
@@ -75,9 +86,13 @@ export async function runMemberTagSlice(
   let changed = 0;
   for (const { customerGid, current, wanted } of results) {
     try {
-      // A renamed tag is moved: the old one comes off.
-      if (current && current !== wanted) await tagMutation(graphql!, TAGS_REMOVE, customerGid, current);
-      if (wanted) await tagMutation(graphql!, TAGS_ADD, customerGid, wanted);
+      // A renamed tag is moved: the old one comes off. Only the difference is sent.
+      const had = tagSet(current);
+      const want = tagSet(wanted);
+      const off = had.filter((tag) => !want.includes(tag));
+      const on = want.filter((tag) => !had.includes(tag));
+      if (off.length) await tagMutation(graphql!, TAGS_REMOVE, customerGid, off);
+      if (on.length) await tagMutation(graphql!, TAGS_ADD, customerGid, on);
       await rawDb
         .prepare(
           `INSERT INTO "MemberTag" ("id", "shopId", "customerGid", "tag", "updatedAt")
@@ -100,8 +115,10 @@ export async function runMemberTagSlice(
     : null;
 }
 
-async function tagMutation(graphql: Graphql, query: string, id: string, tag: string) {
-  const data = await graphql(query, { id, tags: [tag] });
+const tagSet = (tags: string | null) => (tags ? tags.split(",") : []);
+
+async function tagMutation(graphql: Graphql, query: string, id: string, tags: string[]) {
+  const data = await graphql(query, { id, tags });
   const result = data.tagsAdd ?? data.tagsRemove;
   // A customer who's gone has nothing to tag. Anything else is worth another try.
   if (result.userErrors.length > 0 && !/not exist|not found/i.test(result.userErrors[0].message)) {

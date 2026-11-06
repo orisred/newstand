@@ -1,5 +1,6 @@
 import type { createDb } from "./db.server";
 import { logEvent } from "./logger.server";
+import { termsOf } from "./vocabulary";
 
 type Db = ReturnType<typeof createDb>;
 
@@ -33,8 +34,11 @@ export function graphqlOf(admin: {
   };
 }
 
-/** The name of the option customers pick between on a product. Not a release word. */
-export const GROUP_OPTION_NAME = "Subscription";
+/**
+ * The name of the option customers pick between on a product, for a shop that hasn't chosen its words.
+ * Not a release word. A shop's own comes from its vocabulary (`termsOf(...).Noun`).
+ */
+export const GROUP_OPTION_NAME = termsOf().Noun;
 
 /**
  * Set on every group. Liquid exposes it as `selling_plan_group.app_id`, which is how the theme
@@ -53,6 +57,10 @@ export class SyncBusy extends Error {}
 export type SyncablePlan = {
   id: string;
   displayName: string;
+  /** What the plan includes, as the selling plan's description. */
+  description?: string | null;
+  /** The group's option name: the shop's word for what customers buy. */
+  optionName?: string;
   billingMode: "PER_RELEASE" | "PREPAID_BUNDLE";
   termMonths: number | null;
   priceCents: number;
@@ -92,6 +100,8 @@ function sellingPlanFields(plan: SyncablePlan) {
   const cycle = cycleOf(plan);
   return {
     name: plan.displayName,
+    // Empty clears one set before. Shopify reads it back as null or "", and both mean none.
+    description: plan.description ?? "",
     category: "SUBSCRIPTION",
     options: [plan.displayName],
     billingPolicy: { recurring: { ...cycle } },
@@ -120,7 +130,7 @@ export function groupCreateInput(plan: SyncablePlan) {
     name: plan.displayName,
     appId: SELLING_PLAN_APP_ID,
     merchantCode: plan.id,
-    options: [GROUP_OPTION_NAME],
+    options: [plan.optionName ?? GROUP_OPTION_NAME],
     sellingPlansToCreate: [sellingPlanFields(plan)],
   };
 }
@@ -129,6 +139,8 @@ export function groupUpdateInput(plan: SyncablePlan, sellingPlanGid: string) {
   return {
     name: plan.displayName,
     appId: SELLING_PLAN_APP_ID,
+    // So a change of the shop's words reaches groups made before it.
+    options: [plan.optionName ?? GROUP_OPTION_NAME],
     sellingPlansToUpdate: [{ id: sellingPlanGid, ...sellingPlanFields(plan) }],
   };
 }
@@ -136,7 +148,7 @@ export function groupUpdateInput(plan: SyncablePlan, sellingPlanGid: string) {
 const GROUP_FIELDS = `
   id name appId merchantCode options
   sellingPlans(first: 10) { nodes {
-    id name options category
+    id name description options category
     billingPolicy { ... on SellingPlanRecurringBillingPolicy { interval intervalCount minCycles maxCycles } }
     deliveryPolicy { ... on SellingPlanRecurringDeliveryPolicy { interval intervalCount intent preAnchorBehavior cutoff } }
     pricingPolicies { ... on SellingPlanFixedPricingPolicy { adjustmentType adjustmentValue { ... on MoneyV2 { amount currencyCode } } } }
@@ -217,6 +229,7 @@ export type ShopifyGroup = {
     nodes: {
       id: string;
       name: string;
+      description?: string | null;
       options: string[];
       category: string;
       billingPolicy: Record<string, unknown> | null;
@@ -253,7 +266,7 @@ export function describeDifferences(
   check("Group name", group.name, plan.displayName);
   check("Group code", group.merchantCode, plan.id);
   check("Group app ID", group.appId, SELLING_PLAN_APP_ID);
-  check("Group options", group.options, [GROUP_OPTION_NAME]);
+  check("Group options", group.options, [plan.optionName ?? GROUP_OPTION_NAME]);
 
   const plans = group.sellingPlans.nodes;
   if (plans.length !== 1) {
@@ -265,6 +278,7 @@ export function describeDifferences(
     const expected = sellingPlanFields(plan);
     const cycle = cycleOf(plan);
     check("Selling plan name", selling.name, expected.name);
+    check("Selling plan description", selling.description || null, plan.description || null);
     check("Selling plan options", selling.options, expected.options);
     check("Category", selling.category, expected.category);
     const billing = selling.billingPolicy as Record<string, unknown> | null;
@@ -452,6 +466,7 @@ export async function syncPlan(
     select: {
       id: true,
       displayName: true,
+      description: true,
       billingMode: true,
       termMonths: true,
       priceCents: true,
@@ -460,6 +475,7 @@ export async function syncPlan(
       productGid: true,
       sellingPlanGroupGid: true,
       syncRevision: true,
+      shop: { select: { vocabulary: true } },
     },
   });
 
@@ -482,7 +498,8 @@ export async function syncPlan(
 
   try {
     const { group: existing, currency } = await findGroup(graphql, plan);
-    const subject: SyncablePlan = { ...plan, currency };
+    const { shop, ...fields } = plan;
+    const subject: SyncablePlan = { ...fields, currency, optionName: termsOf(shop.vocabulary).Noun };
     const wanted = desiredProducts(subject);
     let groupId: string;
     let sellingPlanId: string;

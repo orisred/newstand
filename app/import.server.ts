@@ -100,6 +100,19 @@ export type ImportSettings = {
   issues: { number: number; title: string; shippedAt: string; match: string[] }[];
   /** Line properties that mark a purchase as a gift. */
   giftKeys: string[];
+  /**
+   * An order tag, lowercased, that an order needs for a shipped release on it to count as received, such
+   * as the old app's subscriber tag, so a retail copy of the same release isn't read as a subscriber's.
+   * Missing or null (runs from before it) counts any order.
+   */
+  orderTag?: string | null;
+  /**
+   * When the shipped list starts covering everything, if that's before its first release: the day the
+   * subscriptions began, so a purchase made before the first release (in effect a pre-order of it) is
+   * inside the list, counted in full and not flagged. Nothing shipped to subscribers between this and the
+   * first line. Missing or null starts the list at its first release, as before.
+   */
+  listFrom?: string | null;
   /** Whether the export says who has cancelled. */
   statusKnown: boolean;
 };
@@ -116,6 +129,8 @@ export function parseSettings(input: {
   issues: string;
   giftKeys: string;
   statusKnown: boolean;
+  orderTag?: string;
+  listFrom?: string;
 }): { ok: true; settings: ImportSettings } | { ok: false; errors: string[] } {
   const errors: string[] = [];
   const plans = Object.entries(input.plans)
@@ -147,6 +162,12 @@ export function parseSettings(input: {
       });
     });
 
+  const from = input.listFrom?.trim() ?? "";
+  const listFrom = from ? new Date(`${from}T00:00:00.000Z`) : null;
+  if (listFrom && (!/^\d{4}-\d{2}-\d{2}$/.test(from) || Number.isNaN(listFrom.getTime()))) {
+    errors.push("The date the shipped list covers from needs YYYY-MM-DD.");
+  }
+
   return errors.length
     ? { ok: false, errors }
     : {
@@ -156,6 +177,8 @@ export function parseSettings(input: {
           issues,
           giftKeys: tokens(input.giftKeys).map((t) => t.toLowerCase()),
           statusKnown: input.statusKnown,
+          orderTag: input.orderTag?.trim().toLowerCase() || null,
+          listFrom: listFrom?.toISOString() ?? null,
         },
       };
 }
@@ -164,7 +187,7 @@ export function parseSettings(input: {
 
 const ADDRESS_FIELDS = `firstName lastName company address1 address2 city provinceCode zip countryCode: countryCodeV2 phone`;
 const ORDER_FIELDS = `
-  id name processedAt test cancelledAt displayFinancialStatus
+  id name processedAt test cancelledAt displayFinancialStatus tags
   totalShippingPriceSet { shopMoney { amount } }
   shippingAddress { ${ADDRESS_FIELDS} }
   lineItems(first: 20) { nodes {
@@ -212,6 +235,8 @@ export type OrderNode = {
   test: boolean;
   cancelledAt: string | null;
   displayFinancialStatus: string | null;
+  /** Missing on reads from before the order-tag filter. */
+  tags?: string[];
   totalShippingPriceSet?: { shopMoney: { amount: string } };
   shippingAddress: Address | null;
   lineItems: {
@@ -394,8 +419,13 @@ function walkBalance(
   termMonths: number | null,
   issues: ImportSettings["issues"],
   orders: OrderNode[],
+  orderTag: string | null = null,
+  listFrom: string | null = null,
 ) {
-  const listStart = Math.min(Infinity, ...issues.map((issue) => timeOf(issue.shippedAt)));
+  const listStart = Math.min(
+    listFrom ? timeOf(listFrom) : Infinity,
+    ...issues.map((issue) => timeOf(issue.shippedAt)),
+  );
   const inList = chain.filter((purchase) => timeOf(purchase.at) >= listStart);
   const counted = inList.length > 0 ? inList : [chain.at(-1)!];
   const startAt = timeOf(counted[0].at);
@@ -415,6 +445,7 @@ function walkBalance(
       .filter(
         (order) =>
           timeOf(order.processedAt) >= startAt &&
+          (!orderTag || (order.tags ?? []).some((tag) => tag.toLowerCase() === orderTag)) &&
           order.lineItems.nodes.some((line) => lineNames(line).some((name) => issue.match.includes(name))),
       )
       .map((order) => timeOf(order.processedAt));
@@ -572,6 +603,8 @@ export function analyzeCustomer(customer: CustomerRead, context: AnalysisContext
       plan.billingMode === "PREPAID_BUNDLE" ? plan.termMonths : null,
       settings.issues,
       orders,
+      settings.orderTag ?? null,
+      settings.listFrom ?? null,
     );
     for (const flag of walked.flags) flags.add(flag);
     const { paid, received, balance: remaining } = walked;

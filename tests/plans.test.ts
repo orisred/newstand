@@ -53,10 +53,34 @@ function valid(overrides: Partial<Record<string, string | boolean>> = {}) {
 }
 
 describe("parsePlan", () => {
+  it("reads a tier's perk text, keeping its line breaks, and its own customer tag", () => {
+    const plan = valid({
+      description: "  Reader-level print subscription\r\n\r\n\r\nPlus:   early access  ",
+      memberTag: " member-insider ",
+    });
+    expect(plan.description).toBe("Reader-level print subscription\n\nPlus: early access");
+    expect(plan.memberTag).toBe("member-insider");
+    expect(valid({ description: "   ", memberTag: "" })).toMatchObject({ description: null, memberTag: null });
+  });
+
+  it("refuses a tag Shopify would split, and markup or control characters in the perk text", () => {
+    const errors = (fields: Record<string, string>) => {
+      const parsed = parsePlan(form({ ...bundle, ...fields }));
+      return parsed.ok ? {} : parsed.errors;
+    };
+    expect(errors({ memberTag: "member, insider" })).toHaveProperty("memberTag");
+    expect(errors({ memberTag: "x".repeat(41) })).toHaveProperty("memberTag");
+    expect(errors({ description: "<b>perks</b>" })).toHaveProperty("description");
+    expect(errors({ description: "bell\u0007" })).toHaveProperty("description");
+    expect(errors({ description: "x".repeat(501) })).toHaveProperty("description");
+  });
+
   it("reads a bundle", () => {
     expect(valid()).toEqual({
       name: "Yearly",
       displayName: "Yearly subscription",
+      description: null,
+      memberTag: null,
       billingMode: "PREPAID_BUNDLE",
       releasesPerTerm: 2,
       termMonths: 12,

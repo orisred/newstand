@@ -112,6 +112,7 @@ export const action = ({ request, context }: ActionFunctionArgs) =>
     const copy = portalCopy({
       singular: subscription.shop.releaseWordSingular,
       plural: subscription.shop.releaseWordPlural,
+      vocabulary: subscription.shop.vocabulary,
     });
     try {
       // A gift's card and contract are the buyer's: refused before Shopify is asked anything.

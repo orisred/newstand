@@ -1240,6 +1240,23 @@ describe("what the customer reads", () => {
     );
   });
 
+  it("says membership for a shop that chose Memberships, and subscription by default", () => {
+    const members = portalCopy({ ...drop, vocabulary: "MEMBERSHIPS" });
+    const text = JSON.stringify([
+      members,
+      members.cancel(2, false, 1),
+      members.cancel(0, true, 0),
+      members.cancelled(1, false),
+      members.cancelled(0, true),
+    ]);
+    expect(text).not.toMatch(/subscri/i);
+    expect(members.heading).toBe("Your membership");
+    expect(members.cancelConfirm).toBe("Cancel my membership");
+    expect(members.cancelled(0, false)).toBe("Your membership is cancelled. You won't be charged again.");
+    expect(portalCopy(drop).heading).toBe("Your subscription");
+    expect(portalCopy(drop).keepButton).toBe("Keep my subscription");
+  });
+
   it("never hard-codes a release word", () => {
     const copy = portalCopy(drop);
     const text = JSON.stringify([

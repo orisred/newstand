@@ -6,6 +6,7 @@ import { graphqlOf } from "../plan-sync.server";
 import { confirmAddress, portalCopy, upcomingFor } from "../portal.server";
 import { linkLimited } from "../rate-limit.server";
 import { unauthenticated } from "../shopify.server";
+import { termsOf } from "../vocabulary";
 
 // The token is in the URL, so keep it out of caches and referrers.
 export const headers = () => ({
@@ -42,6 +43,7 @@ async function load(env: Env, token: string) {
           shopDomain: true,
           releaseWordSingular: true,
           releaseWordPlural: true,
+          vocabulary: true,
         },
       },
     },
@@ -58,6 +60,7 @@ export const loader = async ({ params, context }: LoaderFunctionArgs) => {
   const words = {
     singular: shop.releaseWordSingular,
     plural: shop.releaseWordPlural,
+    vocabulary: shop.vocabulary,
   };
   const release =
     link.k === "address" && link.r
@@ -89,6 +92,7 @@ export const loader = async ({ params, context }: LoaderFunctionArgs) => {
   return {
     kind: link.k,
     word: words.singular,
+    terms: termsOf(shop.vocabulary),
     title,
     confirmable: release?.confirmable ?? false,
     confirmed: release?.confirmed ?? false,
@@ -160,7 +164,7 @@ export default function EmailLink() {
             <>
               <p>
                 Your order is created when it starts shipping, using the
-                delivery address on your subscription. If it&apos;s right,
+                delivery address on your {data.terms.noun}. If it&apos;s right,
                 confirm it here. To see it or change it, sign in to your
                 account.
               </p>
@@ -186,7 +190,7 @@ export default function EmailLink() {
         </a>
       </p>
       <p style={{ fontSize: 14, color: "#6d7175" }}>
-        Sign in with the email address you subscribed with. We&apos;ll send you
+        Sign in with the email address you {data.terms.subscribedWith}. We&apos;ll send you
         a code, and you don&apos;t need a password. If you can&apos;t get in,
         reply to the email you came from.
       </p>

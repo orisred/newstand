@@ -1,5 +1,9 @@
 import { COUNTRY_CODES } from "./countries";
 import type { createDb } from "./db.server";
+import { setAppMetafield } from "./gifts.server";
+import { logEvent } from "./logger.server";
+import type { Graphql } from "./plan-sync.server";
+import { VOCABULARIES, type Vocabulary } from "./vocabulary";
 
 type Db = ReturnType<typeof createDb>;
 
@@ -26,6 +30,7 @@ const shopSelect = {
   id: true,
   releaseWordSingular: true,
   releaseWordPlural: true,
+  vocabulary: true,
   allowedCountries: true,
   orderTiming: true,
   emailsEnabled: true,
@@ -58,6 +63,7 @@ export async function getOrCreateShop(db: Db, shopDomain: string) {
 export type SettingsInput = {
   releaseWordSingular: string;
   releaseWordPlural: string;
+  vocabulary: Vocabulary;
   allowedCountries: string[];
   orderTiming: "READY_TO_SHIP" | "PREORDER_OPENS";
   emailsEnabled: Record<EmailKey, boolean>;
@@ -67,6 +73,7 @@ export type SettingsErrors = Partial<
   Record<
     | "releaseWordSingular"
     | "releaseWordPlural"
+    | "vocabulary"
     | "allowedCountries"
     | "orderTiming",
     string
@@ -97,6 +104,11 @@ export function parseSettings(
   if (singular.error) errors.releaseWordSingular = singular.error;
   if (plural.error) errors.releaseWordPlural = plural.error;
 
+  const vocabulary = form.get("vocabulary");
+  if (!(VOCABULARIES as readonly unknown[]).includes(vocabulary)) {
+    errors.vocabulary = "Choose the words customers see.";
+  }
+
   const countries = [
     ...new Set(
       String(form.get("allowedCountries") ?? "")
@@ -124,6 +136,7 @@ export function parseSettings(
     values: {
       releaseWordSingular: singular.word!,
       releaseWordPlural: plural.word!,
+      vocabulary: vocabulary as Vocabulary,
       allowedCountries: countries,
       orderTiming: orderTiming as SettingsInput["orderTiming"],
       emailsEnabled: Object.fromEntries(
@@ -136,4 +149,20 @@ export function parseSettings(
 /** Saves settings for one shop. The shop ID comes from the session, never the form. */
 export function saveSettings(db: Db, shopId: string, values: SettingsInput) {
   return db.shop.update({ where: { id: shopId }, data: values });
+}
+
+/**
+ * Tells the plan picker which words the shop uses, for its own fallback text: the app-installation
+ * metafield `release_subscriptions.vocabulary`. Run after each plan sync, which a change of words
+ * starts. A failure never blocks a sync: the picker then keeps the words it had.
+ */
+export async function publishVocabulary(db: Db, graphql: Graphql, shopId: string) {
+  try {
+    const shop = await db.shop.findUnique({ where: { id: shopId }, select: { vocabulary: true } });
+    if (shop && !(await setAppMetafield(graphql, "vocabulary", shop.vocabulary.toLowerCase()))) {
+      logEvent("error", "vocabulary.refused", {});
+    }
+  } catch {
+    logEvent("error", "vocabulary.failed", {});
+  }
 }

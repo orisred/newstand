@@ -95,10 +95,19 @@ This takes the guesswork out of cutover day.
 - **Who:** N, in the Shopify admin and the app.
 - **First:** C1.
 - **Do:**
-  1. In the app's Settings: release word "issue"/"issues", countries US, order timing ready to ship, and which emails are on.
+  1. In the app's Settings: release word "issue"/"issues", **What customers buy: Memberships** (so the portal, emails and checkout's option name say "membership" and "member", N 2026-11-06), countries US, order timing ready to ship, and which emails are on.
   2. **Free shipping rate:** put the subscription product in its own shipping profile with one free rate for the US. It must be in place before the first sign-up, because a contract keeps the shipping price it started with.
   3. The subscription product is physical (requires shipping), is stocked at a location N fulfills (not a fulfillment service), and its inventory policy is what N wants. The stock warning reads `inventoryQuantity`.
-  4. Use a **new** subscription product for the app's plans, not the one Conjured sells today. Publish it to the online store but don't link it from navigation, collections or the home page until D6 step 3, so nobody can sign up before the import. Create the plans in the app (Yearly bundle, Pay per issue), with renewal rule, start rule and giftable as decided (A6), and check each says "In sync". The imported contracts use this product too.
+  4. Use a **new** subscription product for the app's plans, not the one Conjured sells today, with **one variant**: the plan is the tier. Publish it to the online store but don't link it from navigation, collections or the home page until D6 step 3, so nobody can sign up before the import. The imported contracts use this product too.
+  5. **Create the three tier plans (N, 2026-11-06), Cake Boss first, then Insider, then Reader.** Shopify lists the newest plan first and the first is the default choice, so this order puts Reader on top. Check each says "In sync". No Pay per issue at cutover.
+
+     | Name (only you see it) | Name customers see | Price | Billing | Customer tag | What it includes |
+     | --- | --- | --- | --- | --- | --- |
+     | Cake Boss | Cake Boss Membership | $260 | Prepaid bundle, 2 issues, 12 months | `member-cake-boss` | Conjured's Cake Boss text |
+     | Insider | Insider Membership | $105 | Prepaid bundle, 2 issues, 12 months | `member-insider` | Conjured's Insider text |
+     | Reader | Reader Membership | $72 | Prepaid bundle, 2 issues, 12 months | `member-reader` | Conjured's Reader text |
+
+     All three: renewal "on the term date, but wait if the last paid issue hasn't shipped", first issue "the latest released issue, until the next pre-order is announced", renew automatically, can be bought as a gift. The tags are new ones, not Conjured's `m-*` tags (N's choice). The shop's own member tag stays `active-subscriber`. Any perk that a tier tag unlocks (early access, a discount) is set up in Shopify against the new tags at D6.
 - **Check:** a plan's selling plan shows on the product in Shopify, and the plans screen says In sync.
 - **Back out:** turn the plans off. The sync removes them from the product and resets "requires a selling plan".
 
@@ -141,7 +150,16 @@ This takes the guesswork out of cutover day.
   1. **Columns:** open the export and note the email column and any status column, with the exact values that mean cancelled. There's still no real sample, so nothing is assumed.
   2. **No status column?** The import then marks everyone `STATUS_UNKNOWN`. Someone who cancelled with a term running would come in active, protected only by the 21-day upcoming-charge email. So get a real list of who cancelled from Conjured's own admin, and add a `Status` column to the file before the dry run. Shopify's customer segments have a `product_subscription_status` filter (values include `CANCELED` and `EXPIRED`). It's **unproved** whether it covers Conjured's contracts, so check it on two customers N knows before relying on it.
   3. **Past issues, as far back as purchases go:** one line per issue, `number | title | date | what its order lines match`. If issues ever went out on Shopify orders (for example through the store's draft-order apps), put the line item name in the last column: that counts who really got each issue and avoids the date rule below. Any purchase from before the first listed issue is flagged `HISTORY_BEFORE_LIST` and its balance isn't counted.
-  4. **Plan mapping:** which order line names mean Yearly and which mean Pay per issue.
+  4. **Plan mapping, by SKU** (the import matches exact SKUs, selling plan names, or product or variant IDs, lowercased; the legacy products are deleted, so their IDs wouldn't match):
+     - Reader: `membership:reader, subscribe:reader` (191 lines)
+     - Insider: `membership:insider, subscribe:insider, subscribe:supporter` (92 lines; Supporter $105 maps to Insider, N 2026-11-06)
+     - Cake Boss: `membership:cake-boss` (11 lines)
+     - The one `subscriptions:supporter` line ($100) was refunded, so it isn't a purchase and needs no mapping.
+  5. **Shipped list, starting at Steak Zine** (N, 2026-11-06: "memberships launched with steak zine"; Volume 7 was never a membership issue):
+     `1 | Special Issue: Steak Zine | 2026-04-15 | CZ00SZ-001` and `2 | Volume 8: Spoiled Rotten | 2026-10-01 | CZ008-001`. Use the real ship dates N has. The numbers are the app's own, so Volume 9 will be 3 (N, 2026-11-06: keep the app's own numbers).
+  6. **The list covers everything from: `2026-02-01`**, the day memberships began. February and March sign-ups came before Steak Zine shipped and paid for it. Without the date their balance is still right, but each line is flagged `HISTORY_BEFORE_LIST` (about 140), and an earlier purchase in the same chain would be dropped.
+  7. **Order tag on subscribers' issues: `subscriber`.** The old app's Flow tagged each new member's sign-up order (which carried their first issue) and the bulk issue orders with it, so only those count as received. Without it, the 19 members who also bought Steak Zine in the shop, and the 9 who bought Volume 8, would lose an issue each.
+  8. **Status and term from Conjured's export.** Conjured's member list has **Membership Status** and **Paid Through** filters and an Export button. Check that the export has those columns, and use Status as the status column. 5 of the 291 members aren't active.
 - **Check:** the operator confirms the file parses on the Import page, the list reaches back past the earliest purchase N expects, and every plan has lines mapped.
 - **Back out:** nothing to undo.
 
@@ -180,7 +198,7 @@ This takes the guesswork out of cutover day.
 - **Who:** the operator runs it. **N authorizes the $1 at that moment.**
 - **First:** C1, A4, and the customer told about it beforehand, because Shopify emails an order confirmation for it.
 - **Do:** with a short script that reads the production offline token from D1 into a variable and never prints it (the CLI can't run mutations here):
-  1. `subscriptionContractAtomicCreate` for the A4 customer: one line on the Yearly selling plan at **$1.00**, `deliveryPrice` 0, their address, their Conjured-vaulted `paymentMethodId` from the dry run, and the contract attribute `_release_subscriptions_import` with the value `card-proof`. The app ignores a contract carrying that attribute, so no subscription is made.
+  1. `subscriptionContractAtomicCreate` for the A4 customer: one line on the Reader selling plan at **$1.00**, `deliveryPrice` 0, their address, their Conjured-vaulted `paymentMethodId` from the dry run, and the contract attribute `_release_subscriptions_import` with the value `card-proof`. The app ignores a contract carrying that attribute, so no subscription is made.
   2. `subscriptionBillingAttemptCreate` with idempotency key `card-proof:<contract id>:1`.
   3. Read the attempt. Success means Shopify Payments accepts a charge on a card Conjured vaulted, through this app's contract.
   4. Cancel the contract, refund the $1 order without notifying, and mark that order fulfilled (or cancel it).
@@ -201,6 +219,8 @@ Do all of this on one day, in this order.
 | 5 | N | **Dry run again**, on a fresh Conjured export (it catches anyone who signed up in Conjured between D4 and step 3) | Read `RENEWED_SINCE_IMPORT`: it should be 0. Any new READY rows are late Conjured sign-ups | n/a |
 | 6 | N | If step 5 has new rows, **Start real run** on it. Rows already DONE are skipped | Those rows reach DONE | As step 1 |
 | 7 | Operator | Check sign-ups made during the import got subscriptions (below) | Every new contract has a subscription | n/a |
+| 8 | N | **Turn off both member Flows:** "New Subscribers: add customer tags, notes, and fulfill membership product" and "New subscribers: add 'latest-issue' to membership order". They only fire on Conjured's product, so they wouldn't touch the app's orders, but nothing should add issues or tags for Conjured's product from now on. Don't copy the "add the latest issue to the sign-up order" step to the new product: the app ships the first issue on its own order, so it would ship twice | Both show Inactive | Turn them back on |
+| 9 | N | Know that three Flows that stay on run on **every** order, the app's too: "Add comped tag to $0 orders" tags every $0 issue order `comped`, "Tag orders with $0 shipping as free-shipping" tags the payment and issue orders, and "Add handling_applied tag to orders" may tag them too. Harmless, but a report filtered on `comped` now includes members' issues. **N wants them adjusted (2026-11-06):** before this day, add a condition to those Flows that skips the app's orders (issue orders are tagged `release-<number>`; check how the payment orders can be told apart), or change the reports instead | The three Flows skip CZ Subs' orders, checked on N's next test sign-up | Remove the condition |
 
 **Why this order:** Conjured stays on until the import has worked, so nobody goes unbilled if the run has to stop. It goes off the same day, long before the app's first possible charge (see "Timeline"). Anyone Conjured charges between D4 and step 1 is read afresh by the real run (`CHANGED_SINCE_DRY_RUN`). Anyone it charges between step 1 and step 4 shows as `RENEWED_SINCE_IMPORT` in step 5.
 
@@ -217,7 +237,8 @@ Do all of this on one day, in this order.
 | Gifts from Conjured | N | The `GIFT` rows aren't imported. For each recipient still owed issues, keep a list and send their issues by hand at each release (a manual order to them) until they're used up | The list exists, with the issues owed |
 | Contracts look right | Operator and N | Open 10 imported contracts in Shopify: customer, address, price, card, $0 shipping, next billing date (a label only) | All right |
 | No welcome emails | Operator | Email rows: imported subscribers get no welcome or tag jobs at import. The hourly member-tag job tags them within the hour | No `welcome` rows for `IMPORTED` subscribers. The tag appears on a sample customer |
-| Member discount | N | The automatic discount for the segment `customer_tags CONTAINS 'active-subscriber'` | A tagged customer sees the discount |
+| Member discount | N | The automatic discount for the segment `customer_tags CONTAINS 'active-subscriber'`. Tier perks (Insider's early access and the like) go against `member-insider` and the other tier tags, not Conjured's `m-*` ones | A tagged customer sees the discount |
+| The customer who switched tiers | Operator and N | One customer paid Cake Boss ($260, 2026-03-26) and then Insider ($105, 2026-09-29); Conjured now has them as one Insider membership. The import makes two subscriptions, Cake Boss and Insider, and both would renew (N, 2026-11-06: by hand). Well before March 2027, N decides how many issues they're still owed; the operator cancels the Cake Boss subscription in the app (paid issues still ship, nothing renews) or ends it if nothing is owed, and corrects `releasesRemaining` on the Insider one if N says so. Find them in D2's report as one customer with rows on two plans | One live subscription is left, on Insider |
 
 ## Stage E: open the doors
 
@@ -272,7 +293,7 @@ On Basic, a custom app gets no Functions and no Flow triggers in the editor (N a
 
 - **Before payment, the plan picker still:** shows only this app's plans, one at a time. It never offers a one-time purchase, because the product requires a plan. It offers gift fields only on a giftable plan. It doesn't stop a second plan in the cart, but a bundle and a pay-per-issue plan now make separate contracts. While a gift is ticked it refuses Add to cart and Buy it now without a valid recipient email, even where the product form has `novalidate`.
 - **After payment, the app flags:**
-  - **Two plans on one contract** (`contract.mixed_plans`, seen again on the dev store with the rule off, #1277). There's no subscription, the order stays unfulfilled, and a red banner shows on the releases screen. **What N does:** refund the order and cancel the contract in Shopify, ask the customer to buy each plan on its own, then press Mark as handled. Since B1 item 3, Cake Zine's bundle and pay-per-issue plan can't merge. Two bundles with the same term, or two pay-per-issue plans, still would.
+  - **Two plans on one contract** (`contract.mixed_plans`, seen again on the dev store with the rule off, #1277). There's no subscription, the order stays unfulfilled, and a red banner shows on the releases screen. **What N does:** refund the order and cancel the contract in Shopify, ask the customer to buy each plan on its own, then press Mark as handled. Since B1 item 3, Cake Zine's bundle and pay-per-issue plan can't merge. Two bundles with the same term, or two pay-per-issue plans, still would. **Cake Zine's three tiers are all 12-month bundles, so two tiers in one cart (say Reader and Insider, added one after the other) do merge:** the picker adds one plan at a time, so this needs a buyer who adds the product twice. Expect it rarely, and handle it as above.
   - **A gift that can't be delivered** (`contract.gift_invalid`): no recipient email, a bad one, or one beside another subscription. **What N does:** contact the buyer, fix the cause if possible (create the customer, make the plan giftable) and press Try again, or else refund and cancel the contract, then press Mark as handled. The buyer hears nothing from the app.
   - **A ticked gift with every field blank** would become the buyer's own auto-renewing subscription with no flag, but the picker now stops it before payment (B1 item 4). A cart built around the picker (a crafted `/cart/add` link) still could.
 - **Flow:** Cake Zine can't use the app's triggers. The app's Flow job will log refusals. That's harmless. B1 item 1 leaves the triggers out of the production app, so those refusals are expected.
